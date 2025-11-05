@@ -1,0 +1,39 @@
+Blood Relation Reasoning Puzzles
+
+Domain: Family kinship and blood relations.
+
+Basic kinship terms:
+- Parent: mother, father
+- Child: son, daughter
+- Sibling: brother, sister
+- Extended: uncle (sibling of parent), aunt, nephew, niece, cousin
+- Grandparent: grandfather, grandmother
+- Grandchild: grandson, granddaughter
+- In-law: brother-in-law, sister-in-law
+
+Reasoning approach:
+1. Build family tree from given facts
+2. Trace lineage: identify parents, siblings, children
+3. Apply kinship definitions to find relationship
+4. Answer: "X is Y's [relation]"
+
+Example family structures:
+- Grandparents: George & Hannah
+- Their children (siblings): Alex & Bella
+- Spouses: Alex-Dana, Bella-Carl
+- Grandchildren: Evan & Fiona (Alex-Dana), Ivy (Bella-Carl)
+
+Common questions:
+- How is X related to Y?
+- Is X the uncle of Y?
+- If X is the father of Y and Y is the father of Z, what is X to Z? (grandfather)
+- What is the relation between X and Z if X is sibling of Y's parent?
+
+Example:
+Question: In a family, George is Hannah's husband. Alex and Bella are their children. Alex is married to Dana. Bella is married to Carl. Evan and Fiona are the children of Alex and Dana. Ivy is the child of Bella and Carl. How is Evan related to Hannah?
+Solution steps:
+1. List family facts: George-Hannah couple, Alex-Bella children, Alex-Dana married, Evan-Fiona children, Bella-Carl married, Ivy child
+2. Trace lineage: Hannah → Alex → Evan (parent chain)
+3. Apply definition: Hannah is parent of Alex, Alex is parent of Evan → Hannah is grandparent
+4. Determine sex: Evan is male, so Hannah is grandmother; Evan is grandson of Hannah
+Answer: Evan is Hannah's grandson

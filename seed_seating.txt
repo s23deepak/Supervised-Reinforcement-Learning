@@ -1,0 +1,34 @@
+Seating Arrangement Reasoning Puzzles
+
+Domain: Linear seating puzzles where people sit in a straight line.
+
+Key conventions:
+- All people face North (toward viewer)
+- Viewer's left = actual left position
+- Positions numbered 1 (left end) to N (right end)
+- Constraints: left/right ends, immediate neighbors, between positions, center position
+
+Common constraint types:
+1. End constraints: "A sits at the left end" or "B sits at the right end"
+2. Immediate neighbor: "X sits immediately to the right of Y"
+3. Between: "Z sits between X and Y"
+4. Center: "M sits in the center" (if odd number of people)
+5. Gap-based: "X sits second to the left of Y" (one person in between)
+
+Common question types:
+- Who sits immediately to the [left/right] of X?
+- Who sits second to the [left/right] of X?
+- Who sits at the left/right end?
+- Who sits in the center?
+- What is the position of X?
+- If X moves to position Y, who sits...?
+
+Example:
+Question: Five people (Ava, Ben, Cara, Dan, Ella) sit in a line. Ava is at the left end. Ella is at the right end. Ben sits immediately to the right of Ava. Cara sits between Ben and Dan. Who sits immediately to the right of Ben?
+Solution steps:
+1. Identify constraints: Ava left end, Ella right end, Ben right of Ava, Cara between Ben and Dan
+2. Fix ends: Ava at 1, Ella at 5
+3. Place Ben: Ben at 2 (immediately right of Ava at 1)
+4. Place Cara and Dan: Cara between Ben (2) and Dan means Cara at 3, Dan at 4
+5. Verify: Ava-Ben-Cara-Dan-Ella = 1-2-3-4-5
+Answer: Cara

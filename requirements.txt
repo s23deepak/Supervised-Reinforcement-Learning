@@ -1,0 +1,9 @@
+transformers==4.52.4
+unsloth
+vllm>=0.4.0
+wheel>=0.42.0
+packaging
+torchvision
+numpy
+tqdm
+psutil

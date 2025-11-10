@@ -11,38 +11,6 @@
       },
       {
         "role": "assistant",
-        "content": "B"
-      }
-    ]
-  },
-  {
-    "messages": [
-      {
-        "role": "system",
-        "content": "You are a helpful assistant."
-      },
-      {
-        "role": "user",
-        "content": "In a family gathering, three generations are present: a great-grandfather, his grandson, and their respective spouses. The great-grandfather is 70 years old, his grandson is 40 years old, and both spouses are 45 years old. The great-grandfather is married to the great-grandmother, who is not present. The great-grandson is married to his aunt, who is 40 years old. Who is the great-grandfather's spouse?"
-      },
-      {
-        "role": "assistant",
-        "content": "A"
-      }
-    ]
-  },
-  {
-    "messages": [
-      {
-        "role": "system",
-        "content": "You are a helpful assistant."
-      },
-      {
-        "role": "user",
-        "content": "Four friends, Alice, Bob, Carol, and Dave, are seated around a circular table. Alice is not sitting next to Bob. Dave is directly across from Carol. Who is sitting next to Dave?"
-      },
-      {
-        "role": "assistant",
         "content": "C"
       }
     ]
@@ -55,7 +23,7 @@
       },
       {
         "role": "user",
-        "content": "In Chapter 7 of the book, there are several techniques mentioned for defending against deception. Which of the following is NOT explicitly discussed as a method to detect deception?"
+        "content": "In a linear arrangement of four seats, Alice, Bob, Carol, and David are seated. It is known that Alice is not sitting next to Bob, and Carol is sitting immediately to the right of David. Who is sitting in the first seat?"
       },
       {
         "role": "assistant",
@@ -71,11 +39,283 @@
       },
       {
         "role": "user",
-        "content": "In a linear seating arrangement for a family reunion, four generations are represented: great-grandparents, grandparents, parents, and children. Each generation has exactly two members. The great-grandparents are seated at one end, and the children are seated at the other end. Given the following relationships and constraints, who sits in which position? Grandpa sits to the immediate right of Great-Grandpa, and Grandma sits to the immediate left of Grandpa. The two parents sit next to each other but not next to their respective spouses. The two children sit next to each other but not next to their respective parents."
+        "content": "In a circular seating arrangement for a family reunion, there are six people: Alex, Ben, Chris, Dana, Erin, and Frank. They need to sit around a table, with the following conditions: Alex and Chris cannot sit next to each other, and Ben and Frank must sit directly across from each other. Who should sit between Dana and Frank to satisfy all conditions?"
       },
       {
         "role": "assistant",
         "content": "A"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "In Chapter 7, which section discusses the use of loaded language for deception?"
+      },
+      {
+        "role": "assistant",
+        "content": "D"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "In a family tree, there are five generations of a single lineage, and each person has exactly two parents except for the first generation. No one is a descendant of more than one person. If the first generation consists of a single individual, who is the great-great-grandfather, and the fifth generation includes a child, what is the identity of the great-grandmother in this family tree?"
+      },
+      {
+        "role": "assistant",
+        "content": "C"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "In a linear seating arrangement of 8 people around a rectangular table, where the long sides are parallel and people are seated facing the longer side, the following relationships and seating preferences are given: Alice prefers to sit next to Bob but not directly across from him, Carol insists on sitting directly opposite Dave, and Eve wants to sit next to Frank but not directly across from him. Given these preferences, who can sit next to George?"
+      },
+      {
+        "role": "assistant",
+        "content": "B"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "In a family gathering, there are five generations represented. Each person sits in a circular arrangement around a table. Given the following clues, determine who sits between the great-grandfather and the grandfather."
+      },
+      {
+        "role": "assistant",
+        "content": "B"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "In a linear seating arrangement, four people\u2014Alice, Bob, Carol, and Dave\u2014are seated in a row. Alice cannot sit next to Bob, and Carol must sit to the immediate right of Dave. Who is sitting in the first position?"
+      },
+      {
+        "role": "assistant",
+        "content": "D"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "In a family tree, there are three generations: Grandfather, Father, and Son. The Grandfather has two sons, one of whom is the Father. The Father has one son, who is the Son. The Grandfather is not married to the Father\u2019s mother, and the Father is not married to the Son\u2019s mother. Who is related to whom, and what are the specific relationships between each pair?"
+      },
+      {
+        "role": "assistant",
+        "content": "A"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "In the given scenario, what is the best course of action for the group to take regarding the water situation?"
+      },
+      {
+        "role": "assistant",
+        "content": "B"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "Given the situation described, what is the best course of action regarding the water and what are the reasons supporting your decision?"
+      },
+      {
+        "role": "assistant",
+        "content": "A"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "Given the context of the logical reasoning problem, which of the following best represents the recommended action for the group?"
+      },
+      {
+        "role": "assistant",
+        "content": "A"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "Which of the following passages contain an argument in our technical sense of that word?"
+      },
+      {
+        "role": "assistant",
+        "content": "B"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "Given the context of weighing pros and cons in logical reasoning, solve the following seating arrangement and blood relation problem: In a linear seating arrangement, three friends\u2014Alice, Bob, and Carol\u2014are seated in a row facing North. Alice is not sitting next to Bob, and Bob is not sitting next to Carol. Additionally, Alice is the mother of Carol, and Carol is the sister of Bob. Determine the seating arrangement and the family relationships."
+      },
+      {
+        "role": "assistant",
+        "content": "D"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "Based on the given scenario, which decision aligns with the reasoning provided?"
+      },
+      {
+        "role": "assistant",
+        "content": "B"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "In the context of the given text, what principle of logical reasoning is violated when Ramone leaves believing the two guys are friendly based solely on his friend's statement?"
+      },
+      {
+        "role": "assistant",
+        "content": "B"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "Which argument about David's uncle's death should be considered the most convincing, based on logical reasoning principles?"
+      },
+      {
+        "role": "assistant",
+        "content": "C"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "Which of the following statements are principles of logical reasoning based on the given text?"
+      },
+      {
+        "role": "assistant",
+        "content": "A"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "In the jury discussion about Jesse Mayfield's guilt, which of the following options correctly identifies the logical inconsistency in the arguments presented by Juror Jones and Dr. White?"
+      },
+      {
+        "role": "assistant",
+        "content": "B"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "Given the scenario where a radio telescope has detected an alien signal, you are asked to recommend how Earth should respond. Which of the following is the most reasonable recommendation based on critical thinking principles?"
+      },
+      {
+        "role": "assistant",
+        "content": "B"
       }
     ]
   }

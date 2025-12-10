@@ -49,13 +49,34 @@ class SRLDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict:
         item = self.data[idx]
 
-        # Prepare input with thinking prompt
-        if self.include_thinking:
-            prompt = f"{item['input_prompt']}\n\n<think>"
-        else:
-            prompt = item['input_prompt']
-
+        # Build prompt with clear format instructions
+        base_prompt = item['input_prompt']
         expert_action = item['expert_action']
+        
+        # Determine expected format from expert action
+        if expert_action.startswith("Checking constraint"):
+            format_hint = "Continue with the next constraint check in the format: 'Checking constraint N: [your analysis] ✓'"
+        elif expert_action.startswith("Answer:"):
+            format_hint = "Provide the final answer in the format: 'Answer: [A/B/C/D]'"
+        else:
+            format_hint = f"Continue in the same format as shown above."
+        
+        # Build the full prompt with format instructions
+        if self.include_thinking:
+            prompt = f"""You are a step-by-step reasoning assistant. Follow the exact format shown in the examples.
+
+{base_prompt}
+
+Instructions: {format_hint}
+
+<think>"""
+        else:
+            prompt = f"""You are a step-by-step reasoning assistant. Follow the exact format shown in the examples.
+
+{base_prompt}
+
+Instructions: {format_hint}
+"""
 
         # Tokenize
         input_ids = self.tokenizer.encode(prompt, max_length=self.max_length, 
@@ -112,16 +133,39 @@ def create_srl_dataloader(
     batch_size: int = 8,
     max_length: int = 512,
     shuffle: bool = True,
-    num_workers: int = 0,
+    num_workers: int = 2,
+    prefetch_factor: int = 2,
 ) -> DataLoader:
-    """Create DataLoader for SRL training"""
+    """
+    Create DataLoader for SRL training with prefetching support.
+    
+    Prefetching allows background data loading while GPU is training,
+    reducing data loading bottlenecks.
+    
+    Args:
+        data_path: Path to JSONL data file.
+        tokenizer: Tokenizer instance.
+        batch_size: Batch size.
+        max_length: Maximum sequence length.
+        shuffle: Whether to shuffle data.
+        num_workers: Number of data loading workers (background threads).
+        prefetch_factor: Number of batches to prefetch per worker.
+        
+    Returns:
+        DataLoader instance.
+    """
     dataset = SRLDataset(data_path, tokenizer, max_length=max_length)
     collator = SRLDataCollator(tokenizer, max_length=max_length)
 
+    # WSL compatibility: pin_memory=False
+    # Prefetching: enable background data loading
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         collate_fn=collator,
         num_workers=num_workers,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
+        pin_memory=False,  # Required for WSL compatibility
+        persistent_workers=num_workers > 0,  # Keep workers alive between batches
     )

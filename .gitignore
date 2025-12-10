@@ -2,3 +2,11 @@ srl/unsloth_compiled_cache/
 srl/srl_model
 srl/hyggingface_tokenizer
 srl/pycache*
+srl/_ref_policy/
+srl/_ref_policy_temp/
+srl/checkpoints/
+.env
+__pycache__/*
+srl/__pycache__/*
+*.pyc
+

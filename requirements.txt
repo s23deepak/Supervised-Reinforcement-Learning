@@ -7,3 +7,6 @@ torchvision
 numpy
 tqdm
 psutil
+nvidia-ml-py  # For GPU monitoring
+tensorboard   # Optional: for tensorboard logging
+wandb         # Optional: for weights & biases logging

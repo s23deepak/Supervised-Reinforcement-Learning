@@ -27,7 +27,7 @@ import unsloth
 from unsloth import FastLanguageModel, PatchFastRL
 
 from srl_config import SRLConfig, DEFAULT_CONFIG
-from srl_reward_function import SRLRewardFunction, DynamicSamplingFilter
+from srl_reward_function import SRLRewardFunction, DynamicSamplingFilter, compute_rewards_parallel as compute_rewards_mp
 from resource_monitor import ResourceMonitor
 
 
@@ -76,14 +76,22 @@ class AsyncSRLTrainer:
             min_similarity=self.config.reward.similarity_threshold,
             penalty_for_format_error=self.config.reward.format_penalty,
         )
-        self.sampler = DynamicSamplingFilter(variance_threshold=0.01)
+        
+        # Dynamic sampling filter - DISABLED by default (keeps all samples)
+        self.sampler = DynamicSamplingFilter(
+            variance_threshold=self.config.sampling.variance_threshold,
+            warmup_steps=self.config.sampling.warmup_steps,
+        )
+        self._sampling_enabled = self.config.sampling.enabled
+        print(f"  [Sampling] Filter enabled: {self._sampling_enabled}, threshold: {self.config.sampling.variance_threshold}")
         
         # Training state
         self.global_step = 0
         self.epoch = 0
         
-        # Thread pool for parallel reward computation
-        self._executor = ThreadPoolExecutor(max_workers=cpu_count())
+        # Reward parallelism info (actual Pool is created in compute_rewards_mp)
+        num_workers = self.config.reward.num_workers or max(1, cpu_count() - 1)
+        print(f"  [Parallelism] Reward computation will use {num_workers} workers")
         
         # Resource monitor for logging CPU/GPU/VRAM/RAM usage
         # Convert config to dict for wandb logging
@@ -270,9 +278,9 @@ class AsyncSRLTrainer:
         expert_actions: List[str]
     ) -> List[List[float]]:
         """
-        Compute rewards in parallel using ThreadPoolExecutor.
+        Compute rewards in parallel using multiprocessing.Pool.
         
-        This runs on CPU while GPU can be doing other work.
+        Uses module-level function for true parallelism (bypasses GIL).
         
         Args:
             rollouts: List of rollout lists per prompt.
@@ -282,18 +290,20 @@ class AsyncSRLTrainer:
             List of reward lists per prompt.
         """
         all_rewards = []
-        
-        def compute_single_reward(action: str, expert: str) -> float:
-            return self.reward_fn(action, expert)
+        num_workers = self.config.reward.num_workers or max(1, cpu_count() - 1)
         
         for prompt_rollouts, expert in zip(rollouts, expert_actions):
-            # Submit all rollouts for this prompt
-            futures = [
-                self._executor.submit(compute_single_reward, rollout, expert)
-                for rollout in prompt_rollouts
-            ]
-            # Collect results
-            rewards = [f.result() for f in futures]
+            # Use module-level multiprocessing function
+            # Each rollout gets compared against the same expert action
+            expert_list = [expert] * len(prompt_rollouts)
+            rewards = compute_rewards_mp(
+                completions=prompt_rollouts,
+                expert_actions=expert_list,
+                format_check=self.config.reward.format_check,
+                min_similarity=self.config.reward.similarity_threshold,
+                penalty=self.config.reward.format_penalty,
+                num_workers=num_workers,
+            )
             all_rewards.append(rewards)
         
         return all_rewards
@@ -445,8 +455,8 @@ class AsyncSRLTrainer:
         
         with self._resource_monitor.log_phase("Training (Loss + Backward)", step=self.global_step):
             for prompt, prompt_rollouts, prompt_rewards in zip(prompts, rollouts, rewards):
-                # Skip if low variance (dynamic sampling)
-                if not self.sampler.should_keep_sample(prompt_rewards):
+                # Skip if low variance (dynamic sampling) - only if enabled
+                if self._sampling_enabled and not self.sampler.should_keep_sample(prompt_rewards):
                     continue
                 
                 loss, kl = self.compute_grpo_loss(prompt, prompt_rollouts, prompt_rewards)
@@ -552,8 +562,6 @@ class AsyncSRLTrainer:
         print(f"✓ Checkpoint saved")
     
     def __del__(self):
-        """Cleanup executor and resource monitor on deletion."""
-        if hasattr(self, '_executor'):
-            self._executor.shutdown(wait=False)
+        """Cleanup resource monitor on deletion."""
         if hasattr(self, '_resource_monitor'):
             self._resource_monitor.close()

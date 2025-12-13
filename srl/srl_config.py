@@ -72,6 +72,15 @@ class RewardConfig:
 
 
 @dataclass
+class SamplingConfig:
+    """Dynamic sampling filter configuration."""
+    # DISABLED by default - set to 0.01 to enable filtering
+    variance_threshold: float = 0.0  # Keep ALL samples (was 0.01)
+    warmup_steps: int = 10000  # Steps before reaching max threshold
+    enabled: bool = False  # Whether to filter at all
+
+
+@dataclass
 class LoggingConfig:
     """Logging and monitoring configuration."""
     backend: str = "console"  # "console", "tensorboard", or "wandb"
@@ -89,6 +98,7 @@ class SRLConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     vllm: VLLMConfig = field(default_factory=VLLMConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
+    sampling: SamplingConfig = field(default_factory=SamplingConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     
     # Paths
@@ -114,13 +124,26 @@ class SRLConfig:
     
     @classmethod
     def for_small_model(cls) -> "SRLConfig":
-        """Configuration using smaller 3B model for testing."""
+        """Configuration using smaller 3B model for testing with max utilization."""
         config = cls.for_rtx_5060()
         config.model.model_name = "unsloth/Qwen2.5-3B-Instruct-bnb-4bit"
         config.model.lora_rank = 16
         config.model.lora_alpha = 16
+        
         # Disable format check for testing - model outputs won't match strict regex
         config.reward.format_check = False
+        
+        # MAXIMIZE UTILIZATION:
+        # 1. Disable variance filter - keep ALL samples for training
+        config.sampling.enabled = False
+        config.sampling.variance_threshold = 0.0
+        
+        # 2. Increase batch size for better GPU utilization during training
+        config.training.batch_size = 2  # 2x more work per step
+        
+        # 3. Increase rollouts for more reward computation parallelism
+        config.training.num_rollouts = 8  # 8 rollouts per prompt = more CPU work
+        
         return config
 
 

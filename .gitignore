@@ -1,4 +1,15 @@
 srl/unsloth_compiled_cache/
 srl/srl_model
 srl/hyggingface_tokenizer
-srl/pycache*
+srl/__pycache__/
+srl/checkpoints
+srl/_ref_policy
+.env
+srl/unsloth_compiled_cache
+srl/srl_model
+srl/hyggingface_tokenizer
+srl/__pycache__/
+srl/checkpoints
+srl/__
+.env
+srl/runs

@@ -306,9 +306,7 @@ def main():
     
     print("\n[Step 8] Saving model...")
     final_path = os.path.join(args.output_dir, "final")
-    model.save_pretrained(
-        
-    )
+    model.save_pretrained(final_path)
     tokenizer.save_pretrained(final_path)
     
     print("\n" + "=" * 70)

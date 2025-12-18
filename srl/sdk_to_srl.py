@@ -26,26 +26,30 @@ def split_cot_into_steps(cot: str) -> Tuple[List[str], str]:
     Extract numbered steps and final Answer line from CoT string.
 
     Expected format:
-        1. Title: content
-        2. Title: content
-        ...
-        Final Answer: final_answer
+        Step 1: content\\nStep 2: content\\n...\\nFinal answer: ...
 
     Returns:
         (steps: list of numbered step strings, answer_line: "Answer: ..." or None)
     """
-    lines = [l.strip() for l in cot.strip().replace('\\n', '\n').splitlines() if l.strip()]
-    steps = []
+    # Convert escaped \\n to actual newlines
+    text = cot.replace('\\n', '\n').replace('\\\\n', '\n')
+    
+    # Extract answer line first
     answer_line = None
-    step_and_content_pattern = r'^Step \d+:\s*\.$|Checking constraint \d+:'
-    for ln in lines:
-        # Check if line is Answer
-        if "Final Answer:" in ln:
-            answer_line = ln
-            break
-        # Check if line is a numbered step: "Step N: content"
-        if re.match(step_and_content_pattern, ln):
-            steps.append(ln)
+    answer_match = re.search(r'(Final [Aa]nswer:.*?)(?:\n|$)', text, re.IGNORECASE)
+    if answer_match:
+        answer_line = answer_match.group(1).strip()
+    elif re.search(r'^Answer:', text, re.IGNORECASE | re.MULTILINE):
+        answer_match = re.search(r'(Answer:.*?)(?:\n|$)', text, re.IGNORECASE)
+        if answer_match:
+            answer_line = answer_match.group(1).strip()
+    
+    # Extract all numbered steps
+    # Match "Step N: content" or "Checking constraint N: content"
+    step_pattern = r'(Step \d+:[^\n]*|Checking constraint \d+:[^\n]*)'
+    steps = re.findall(step_pattern, text, re.IGNORECASE)
+    steps = [s.strip() for s in steps if s.strip()]
+    
     return steps, answer_line
 
 

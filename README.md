@@ -20,6 +20,14 @@ This repository implements the SRL pipeline using:
 - **Unsloth**: Memory-efficient LoRA and 4-bit quantization.
 - **vLLM Sleep Mode**: Time-division multiplexing to enable training on GPUs with limited VRAM (e.g., 8GB).
 
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| **vLLM Sleep Mode** | Time-division multiplexing for 8GB VRAM training |
+| **LoRA + 4-bit** | Memory-efficient fine-tuning via Unsloth |
+| **TensorBoard** | Real-time training metrics and resource monitoring |
+
 ## Project Structure
 
 ```
@@ -62,6 +70,11 @@ Training data is generated using [Meta's Synthetic-Data-Kit](https://github.com/
 
 **For most systems:**
 ```bash
+# Clone the repository
+git clone https://github.com/s23deepak/Supervised-Reinforcement-Learning
+cd Supervised-Reinforcement-Learning
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
@@ -95,16 +108,12 @@ python srl/train_srl.py --small-model --epochs 1
 python srl/train_srl.py --epochs 1
 ```
 
-## Key Features
-
-| Feature | Description |
-|---------|-------------|
-| **SRL Reward** | Step-wise sequence similarity rewards. |
-| **Memory Tiering** | vLLM sleep mode: VRAM ↔ System RAM during training steps. |
-| **4-bit Quantization** | QLoRA via Unsloth for reduced memory footprint. |
-| **Gradient Checkpointing** | Further reduces activation memory. |
-
-## Arguments
+### Monitoring
+```bash
+# TensorBoard
+tensorboard --logdir ./checkpoints_trl_vllm/logs
+```
+## Training Arguments
 
 | Argument | Description | Default |
 |----------|-------------|---------|
@@ -114,18 +123,43 @@ python srl/train_srl.py --epochs 1
 | `--train-data` | Path to training JSONL | `./data/srl_train.jsonl` |
 | `--output-dir` | Checkpoint directory | `./checkpoints_trl_vllm` |
 | `--no-vllm` | Disable vLLM (fallback to HF generate) | False |
+| `--no-instruction` | Disable step instruction | False |
 
 ## Hardware Requirements
 
 | Component | Minimum | Recommended |
 |-----------|---------|-------------|
-| GPU VRAM | 6GB | 8GB+ (Nvidia 30/40/50 series) |
+| GPU VRAM | 6GB | 8GB+ |
 | System RAM | 16GB | 32GB+ |
 | Storage | 20GB | 50GB+ |
 
-## Reference
+Tested on: NVIDIA RTX 5060 (8GB)
+
+---
+
+## Data Format
+
+SRL training data is in JSONL format:
+
+```json
+{
+  "input_prompt": "Question: Who is Jack's aunt?\n\nStep 1: Identify family members...\nStep 2: John is Jack's father...",
+  "expert_action": "Step 3: Sarah is John's sister, making her Jack's aunt.",
+  "topic": "blood_relation",
+  "step_number": 2,
+  "total_steps": 4
+}
+```
+
+Use `sdk_to_srl.py` to convert chain-of-thought data to this format.
+
+## References
 
 - [SRL Paper](https://arxiv.org/abs/2407.18248) - Google DeepMind
 - [TRL Documentation](https://huggingface.co/docs/trl)
 - [Unsloth AI](https://github.com/unslothai/unsloth)
 - [vLLM Sleep Mode](https://docs.vllm.ai/en/latest/design/v1/sleep.html)
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.

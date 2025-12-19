@@ -30,10 +30,14 @@ class SRLRewardFunction:
     def __init__(self, 
                  format_check: bool = True,
                  min_similarity: float = 0.0,
-                 penalty_for_format_error: float = -1.0):
+                 penalty_for_format_error: float = -1.0,
+                 use_dynamic_filter: bool = True,
+                 variance_threshold: float = 0.01):
         self.format_check = format_check
         self.min_similarity = min_similarity
         self.penalty_for_format_error = penalty_for_format_error
+        self.use_dynamic_filter = use_dynamic_filter
+        self.dynamic_filter = DynamicSamplingFilter(variance_threshold) if use_dynamic_filter else None
 
     def check_format(self, generated_output: str) -> bool:
         """Check if generated output is in expected format "Step N: content", "Checking Constraint N: content" or "Final Answer: ..."""
@@ -70,6 +74,30 @@ class SRLRewardFunction:
 
         similarity = self.compute_sequence_similarity(action_part, expert_action)
         return similarity
+
+    def compute_batch_rewards(self, 
+                              completions: list, 
+                              expert_actions: list) -> list:
+        """
+        Compute rewards for a batch of completions with dynamic sampling.
+        
+        Args:
+            completions: List of generated texts (K rollouts).
+            expert_actions: List of expert actions.
+            
+        Returns:
+            List of rewards. All zeros if dynamic filter rejects the sample.
+        """
+        rewards = []
+        for completion, expert in zip(completions, expert_actions):
+            reward = self(completion, expert)
+            rewards.append(reward)
+        
+        # Apply dynamic sampling filter (Section 4.2 of SRL paper)
+        if self.dynamic_filter and not self.dynamic_filter.should_keep_sample(rewards):
+            return [0.0] * len(rewards)
+        
+        return rewards
 
     def _extract_action_part(self, output: str) -> str:
         """

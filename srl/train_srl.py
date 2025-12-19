@@ -52,6 +52,7 @@ from trl import GRPOConfig, GRPOTrainer
 
 from srl_reward_function import SRLRewardFunction
 from resource_monitor import ResourceMonitorCallback
+from functools import partial
 
 
 # SRL instruction: tell model to generate only the next step
@@ -81,9 +82,14 @@ def load_srl_dataset(data_path: str, use_instruction: bool = True) -> Dataset:
             if line.strip():
                 item = json.loads(line)
                 prompt = instruction + item["input_prompt"]
+                # Extract question prefix for grouping
+                # Use input_prompt (without instruction) since instruction is same for all
+                # First 200 chars of the actual question content
+                question_prefix = item["input_prompt"][:200]
                 samples.append({
                     "prompt": prompt,
                     "expert_action": item.get("expert_action", ""),
+                    "question_prefix": question_prefix,
                 })
     
     print(f"  Loaded {len(samples)} samples from {data_path}")
@@ -91,7 +97,31 @@ def load_srl_dataset(data_path: str, use_instruction: bool = True) -> Dataset:
     return Dataset.from_list(samples)
 
 
-def create_srl_reward_function(format_check: bool = False):
+def prefix_aware_collate_fn(features, tokenizer):
+    """
+    Custom collator that sorts batch by question prefix.
+    
+    This groups samples with similar prefixes together,
+    maximizing vLLM prefix cache hits within each batch.
+    """
+    # Sort by question prefix to group related samples together
+    features = sorted(features, key=lambda x: x.get("question_prefix", ""))
+    
+    # Remove the question_prefix field - not needed for training
+    for f in features:
+        f.pop("question_prefix", None)
+    
+    # Handle string fields separately
+    prompts = [f.pop("prompt") for f in features]
+    expert_actions = [f.pop("expert_action") for f in features]
+    
+    batch = {}
+    batch["prompt"] = prompts
+    batch["expert_action"] = expert_actions
+    
+    return batch
+
+def create_srl_reward_function(format_check: bool = False, use_dynamic_filter: bool = True):
     """
     TRL-compatible reward function with SRL step-wise similarity.
     
@@ -99,16 +129,18 @@ def create_srl_reward_function(format_check: bool = False):
     - completions: list of generated texts
     - prompts: list of input prompts  
     - Any additional columns from dataset (e.g., expert_action)
+    Uses SRLRewardFunction.compute_batch_rewards which includes dynamic sampling.
     """
     srl_reward = SRLRewardFunction(
         format_check=format_check,
         min_similarity=0.0,
         penalty_for_format_error=-1.0,
+        use_dynamic_filter=use_dynamic_filter,
     )
     
     def reward_fn(completions, prompts=None, expert_action=None, **kwargs):
         """
-        Compute SRL similarity rewards.
+        Compute SRL similarity rewards  with dynamic sampling.
         
         Args:
             completions: List of generated texts.
@@ -126,13 +158,9 @@ def create_srl_reward_function(format_check: bool = False):
             expert_actions = [expert_action] * len(completions)
         else:
             expert_actions = expert_action
-            
-        rewards = []
-        for completion, expert in zip(completions, expert_actions):
-            reward = srl_reward(completion, expert)
-            rewards.append(reward)
         
-        return rewards
+        # Use compute_batch_rewards which includes dynamic sampling filter
+        return srl_reward.compute_batch_rewards(completions, expert_actions)
     
     return reward_fn
 
@@ -146,6 +174,7 @@ def main():
     parser.add_argument("--num-rollouts", type=int, default=4, help="Rollouts per prompt (K)")
     parser.add_argument("--no-vllm", action="store_true", help="Disable vLLM (use HF generate)")
     parser.add_argument("--no-instruction", action="store_true", help="Disable SRL step instruction")
+    parser.add_argument("--max-samples", type=int, default=None, help="Limit dataset size (for testing)")
     args = parser.parse_args()
     
     
@@ -191,11 +220,14 @@ def main():
                 load_in_4bit=True,
                 fast_inference=True,
                 gpu_memory_utilization=0.6,
+                # Enable prefix caching for KV-cache reuse
+                # When prompts share a common prefix (same question and previous steps),
+                enable_prefix_caching=True,
             )
-            print("  ✓ Model loaded with vLLM")
+            print("Model loaded with vLLM")
         except Exception as e:
-            print(f"  ⚠ vLLM failed: {e}")
-            print("  ⚠ Falling back to standard inference...")
+            print(f"vLLM failed: {e}")
+            print("Falling back to standard inference...")
             use_vllm = False
             model, tokenizer = FastLanguageModel.from_pretrained(
                 model_name=model_name,
@@ -232,6 +264,10 @@ def main():
     print("\n[Step 4] Loading dataset...")
     train_dataset = load_srl_dataset(args.train_data, use_instruction=not args.no_instruction)
     
+    # Limit dataset size for testing
+    if args.max_samples and args.max_samples < len(train_dataset):
+        train_dataset = train_dataset.select(range(args.max_samples))
+        print(f"Limited to {args.max_samples} samples for testing")
     
     # Step 5: Create Reward Function
     
@@ -282,6 +318,8 @@ def main():
     
     # Create resource monitor callback
     resource_callback = ResourceMonitorCallback(sample_interval=2.0)
+    # Create prefix-aware collator for KV-cache optimization
+    collator = partial(prefix_aware_collate_fn, tokenizer=tokenizer)
     
     trainer = GRPOTrainer(
         model=model,
@@ -290,6 +328,7 @@ def main():
         reward_funcs=reward_fn,
         tokenizer=tokenizer,
         callbacks=[resource_callback],
+        data_collator=collator,
     )
     
    

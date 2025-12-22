@@ -1,9 +1,39 @@
-transformers
+# SRL + RLVR Training Requirements
+
+# Core ML
+torch>=2.0.0
+transformers>=4.40.0
 tokenizers
-unsloth
-wheel>=0.42.0
-packaging
-torchvision
-numpy
-tqdm
+
+# Unsloth for efficient training
+unsloth[vllm]>=2025.11
+
+# vLLM for fast inference
+vllm>=0.6.0
+
+# TRL for GRPO training
+trl>=0.15.0
+
+# PEFT for LoRA
+peft>=0.7.0
+
+# Dataset handling
+datasets>=2.14.0
+
+# Similarity computation (faster than difflib)
+cdifflib
+
+# Resource monitoring
 psutil
+pynvml
+
+# Visualization
+matplotlib
+tensorboard
+
+# Utilities
+python-dotenv>=1.0.0
+numpy<2.3
+tqdm
+packaging
+wheel>=0.42.0

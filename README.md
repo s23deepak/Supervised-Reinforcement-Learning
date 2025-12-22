@@ -1,6 +1,15 @@
-# Supervised-Reinforcement-Learning
+# Supervised Reinforcement Learning (SRL)
 
-Implementation of Supervised Reinforcement Learning (SRL), a fine-tuning method published by Google.
+Implementation of Supervised Reinforcement Learning (SRL) + RLVR for step-by-step reasoning.
+
+## Overview
+
+SRL trains models to generate reasoning steps one at a time, using sequence similarity as reward. RLVR then fine-tunes for correct final answers.
+
+```
+Stage 1: SRL → Learn step-by-step reasoning
+Stage 2: RLVR → Learn correct final answers
+```
 
 ## What is SRL?
 
@@ -20,110 +29,74 @@ This repository implements the SRL pipeline using:
 - **Unsloth**: Memory-efficient LoRA and 4-bit quantization.
 - **vLLM Sleep Mode**: Time-division multiplexing to enable training on GPUs with limited VRAM (e.g., 8GB).
 
-## Features
+## Quick Start
 
-| Feature | Description |
-|---------|-------------|
-| **vLLM Sleep Mode** | Time-division multiplexing for 8GB VRAM training |
-| **LoRA + 4-bit** | Memory-efficient fine-tuning via Unsloth |
-| **TensorBoard** | Real-time training metrics and resource monitoring |
+```bash
+# Install dependencies
+pip install -r srl/requirements_nvidia_50Series.txt
+
+# Stage 1: SRL Training
+cd srl
+python train_srl.py --model unsloth/Qwen2.5-3B-Instruct-bnb-4bit --max-samples 100
+
+# Stage 2: RLVR Training  
+python train_srl_rlvr.py --srl-checkpoint ./checkpoints_trained_srl/final
+
+# Test the model
+python test_model.py --model ./checkpoints_trained_srl_rlvr/final
+```
 
 ## Project Structure
 
 ```
-Supervised-Reinforcement-Learning/
-├── README.md                     # This file
-├── requirements.txt              # Base dependencies
-├── config.yaml                   # Model and training configuration
-├── sdk_config.yaml               # Configuration for Meta's Synthetic-Data-Kit
-├── setup_50Series.sh             # Setup script for Nvidia 50 series GPU
-│
-├── srl/                          # Core SRL library
-│   ├── train_srl.py              # Main training script (TRL + Unsloth + vLLM)
-│   ├── srl_reward_function.py    # Sequence similarity reward and dynamic sampling filter
-│   ├── srl_data_loader.py        # Dataset and DataLoader for SRL training
-│   ├── sdk_to_srl.py             # Convert chain-of-thought data to SRL step-pairs
-│   ├── srl_training_sdk.py       # Alternative SRL trainer using custom training loop
-│   ├── resource_monitor.py       # CPU/GPU/RAM/VRAM monitoring callback for TensorBoard
-│   │
-│   └── data/                     # Training data directory
-│       └── srl_train.jsonl       # Training data in JSONL format
-│
-└── logical_reasoning/            # Data generation for logical reasoning tasks using Meta's Synthetic-Data-Kit
+srl/
+├── train_srl.py              # Stage 1: SRL training
+├── train_srl_rlvr.py         # Stage 2: RLVR training
+├── srl_reward_function.py    # Step similarity reward (2M/T)
+├── rlvr_reward_function.py   # Final answer correctness (0/1)
+├── unified_logger.py         # TensorBoard, CSV, matplotlib logging
+├── test_model.py             # Model evaluation
+├── sdk_to_srl.py             # Data conversion utility
+└── data/
+    └── srl_train.jsonl       # SRL training data
 ```
 
-Training data is generated using [Meta's Synthetic-Data-Kit](https://github.com/meta-llama/synthetic-data-kit) with the `sdk_config.yaml` configuration file. The `sdk_to_srl.py` script then converts the generated chain-of-thought solutions into step-wise training pairs.
-
-### Key Files
-
-| File | Description |
-|------|-------------|
-| `train_srl.py` | Main entry point. Uses TRL's `GRPOTrainer` with Unsloth and vLLM. |
-| `srl_reward_function.py` | Computes sequence similarity reward (`R = 2M / T`) and implements the dynamic sampling filter from the SRL paper. |
-| `srl_data_loader.py` | Loads JSONL data and prepares it for training. |
-| `sdk_to_srl.py` | Converts full chain-of-thought solutions into (prompt, next_step) pairs for SRL training. |
-| `resource_monitor.py` | A `TrainerCallback` that logs system resource usage to TensorBoard. |
-
-## Quick Start
-
-### Installation
-
-**For most systems:**
-```bash
-# Clone the repository
-git clone https://github.com/s23deepak/Supervised-Reinforcement-Learning
-cd Supervised-Reinforcement-Learning
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-**For Nvidia 50 Series GPUs (RTX 5060, 5070, 5080, 5090):**
-
-These GPUs require nightly builds of PyTorch and vLLM for CUDA 12.8 support.
-
-```bash
-# Install PyTorch nightly with CUDA 12.8
-uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 --prerelease=allow
-
-# Install vLLM nightly
-uv pip install vllm --torch-backend=auto
-
-# Install Unsloth and other dependencies
-uv pip install unsloth unsloth_zoo bitsandbytes
-
-# Upgrade transformers
-uv pip install -U transformers
-```
-
-### Training
-
-The main training script is located in `srl/train_srl.py`.
-
-```bash
-# Train with 3B model (8GB VRAM friendly)
-python srl/train_srl.py --small-model --epochs 1
-
-# Train with 7B model (uses vLLM sleep mode)
-python srl/train_srl.py --epochs 1
-```
-
-### Monitoring
-```bash
-# TensorBoard
-tensorboard --logdir ./checkpoints_trl_vllm/logs
-```
 ## Training Arguments
 
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--small-model` | Use 3B model instead of 7B | False |
-| `--epochs` | Number of training epochs | 1 |
-| `--num-rollouts` | Rollouts per prompt (K) | 4 |
-| `--train-data` | Path to training JSONL | `./data/srl_train.jsonl` |
-| `--output-dir` | Checkpoint directory | `./checkpoints_trl_vllm` |
-| `--no-vllm` | Disable vLLM (fallback to HF generate) | False |
-| `--no-instruction` | Disable step instruction | False |
+### train_srl.py
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--model` | Qwen2.5-3B-Instruct-bnb-4bit | Model name or path |
+| `--lora-rank` | 16 | LoRA rank |
+| `--batch-size` | 1 | Per-device batch size |
+| `--grad-accum` | 4 | Gradient accumulation steps |
+| `--lr` | 5e-6 | Learning rate |
+| `--epochs` | 1 | Training epochs |
+| `--num-rollouts` | 4 | Rollouts per prompt (K) |
+| `--max-seq-length` | 2048 | Max input sequence length |
+| `--max-completion-length` | 256 | Max generation length |
+| `--gpu-memory` | 0.6 | vLLM GPU memory utilization |
+| `--no-4bit` | False | Disable 4-bit quantization |
+
+### train_srl_rlvr.py
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--srl-checkpoint` | (required) | Path to SRL-trained model |
+| `--epochs` | 1 | Training epochs |
+| `--max-samples` | None | Limit dataset size |
+
+## Logging & Monitoring
+
+Training generates:
+- **TensorBoard**: Real-time metrics in `./checkpoints/logs`
+- **CSV files**: `metrics.csv`, `resource_samples.csv`, `phase_metrics.csv`
+- **Plots**: `resources.png`, `training_curves.png`, `phase_breakdown.png`
+
+```bash
+tensorboard --logdir ./checkpoints_trained_srl/logs
+```
 
 ## Hardware Requirements
 
@@ -131,35 +104,41 @@ tensorboard --logdir ./checkpoints_trl_vllm/logs
 |-----------|---------|-------------|
 | GPU VRAM | 6GB | 8GB+ |
 | System RAM | 16GB | 32GB+ |
-| Storage | 20GB | 50GB+ |
 
 Tested on: NVIDIA RTX 5060 (8GB)
 
----
-
 ## Data Format
 
-SRL training data is in JSONL format:
+### SRL Training Data (JSONL)
 
 ```json
 {
-  "input_prompt": "Question: Who is Jack's aunt?\n\nStep 1: Identify family members...\nStep 2: John is Jack's father...",
-  "expert_action": "Step 3: Sarah is John's sister, making her Jack's aunt.",
-  "topic": "blood_relation",
-  "step_number": 2,
-  "total_steps": 4
+  "input_prompt": "Question: ...\n\nStep 1: ...\nStep 2: ...",
+  "expert_action": "Step 3: ..."
 }
 ```
 
-Use `sdk_to_srl.py` to convert chain-of-thought data to this format.
+### RLVR Training Data (JSON)
+
+```json
+{
+  "qa_pairs": [
+    {
+      "question": "Four siblings...",
+      "choices": ["A) Bob", "B) Dave", "C) Either", "D) Not enough info"],
+      "answer": "A"
+    }
+  ]
+}
+```
 
 ## References
 
-- [SRL Paper](https://arxiv.org/abs/2407.18248) - Google DeepMind
+- [SRL Paper](https://arxiv.org/abs/2510.25992) - Google
 - [TRL Documentation](https://huggingface.co/docs/trl)
 - [Unsloth AI](https://github.com/unslothai/unsloth)
-- [vLLM Sleep Mode](https://docs.vllm.ai/en/latest/design/v1/sleep.html)
+- [vLLM](https://github.com/vllm-project/vllm)
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License

@@ -17,10 +17,20 @@ trl>=0.15.0
 # Dataset handling
 datasets>=2.14.0
 
+# Similarity computation
+cdifflib
+
+# Resource monitoring
+psutil
+pynvml
+
+# Visualization
+matplotlib
+tensorboard
+
 # Utilities
 python-dotenv>=1.0.0
 numpy<2.3  # Required for numba compatibility
 
-# Optional: for profiling/monitoring
-# memory-profiler
-# nvidia-ml-py3
+# PEFT for LoRA
+peft>=0.7.0

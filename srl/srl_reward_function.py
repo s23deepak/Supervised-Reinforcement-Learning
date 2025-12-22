@@ -17,11 +17,23 @@ Methods in SRLRewardFunction:
 Methods in DynamicSamplingFilter:
     - __init__(variance_threshold: float)
     - should_keep_sample(rewards: list) -> bool
+
+Uses cdifflib (C extension) with ThreadPoolExecutor for parallel reward computation.
 """
 
 import difflib
 from typing import Dict, Any
 import re
+from concurrent.futures import ThreadPoolExecutor
+import os
+
+from cdifflib import CSequenceMatcher
+from unified_logger import begin_phase, end_phase, log_samples
+
+# Number of CPU cores for parallel reward computation
+NUM_WORKERS = min(os.cpu_count() or 4, 8)
+
+print(f"[SRL Reward] Using cdifflib with {NUM_WORKERS} workers")
 
 
 class SRLRewardFunction:
@@ -50,16 +62,18 @@ class SRLRewardFunction:
     def compute_sequence_similarity(self, 
                                     generated_action: str, 
                                     expert_action: str) -> float:
-        """Compute sequence similarity: R = 2M / T"""
-        matcher = difflib.SequenceMatcher(None, generated_action, expert_action)
-        matching_blocks = matcher.get_matching_blocks()
-        total_matched = sum(block.size for block in matching_blocks)
+        """
+        Compute sequence similarity: R = 2M / T
+        
+        Uses cdifflib (C extension, GIL-free, thread-safe).
+        """
         total_length = len(generated_action) + len(expert_action)
-
         if total_length == 0:
             return 1.0
-
-        similarity = (2 * total_matched) / total_length
+            
+        matcher = CSequenceMatcher(None, generated_action, expert_action)
+        similarity = matcher.ratio()
+            
         return max(similarity, self.min_similarity)
 
     def __call__(self, 
@@ -77,27 +91,59 @@ class SRLRewardFunction:
 
     def compute_batch_rewards(self, 
                               completions: list, 
-                              expert_actions: list) -> list:
+                              expert_actions: list,
+                              parallel: bool = True,
+                              n_workers: int = None) -> list:
         """
         Compute rewards for a batch of completions with dynamic sampling.
         
         Args:
             completions: List of generated texts (K rollouts).
             expert_actions: List of expert actions.
+            parallel: If True, compute rewards in parallel across CPU cores.
+            n_workers: Number of worker threads (default: NUM_WORKERS).
             
         Returns:
             List of rewards. All zeros if dynamic filter rejects the sample.
         """
-        rewards = []
-        for completion, expert in zip(completions, expert_actions):
-            reward = self(completion, expert)
-            rewards.append(reward)
+        begin_phase("reward")  # Track reward computation phase
+        
+        n = len(completions)
+        
+        if n == 0:
+            end_phase()
+            return []
+        
+        if n_workers is None:
+            n_workers = min(n, NUM_WORKERS)
+        
+        if parallel and n > 1:
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                rewards = list(executor.map(
+                    self._compute_single_reward,
+                    completions,
+                    expert_actions
+                ))
+        else:
+            # Sequential computation
+            rewards = []
+            for completion, expert in zip(completions, expert_actions):
+                reward = self(completion, expert)
+                rewards.append(reward)
         
         # Apply dynamic sampling filter (Section 4.2 of SRL paper)
         if self.dynamic_filter and not self.dynamic_filter.should_keep_sample(rewards):
+            log_samples(kept=0, total=len(rewards))  # Log that all samples were filtered
+            end_phase()
             return [0.0] * len(rewards)
         
+        log_samples(kept=len(rewards), total=len(rewards))  # Log kept samples
+        end_phase()
         return rewards
+
+    def _compute_single_reward(self, completion: str, expert_action: str) -> float:
+        """Helper for parallel reward computation."""
+        return self(completion, expert_action)
 
     def _extract_action_part(self, output: str) -> str:
         """

@@ -155,7 +155,8 @@ def main():
                         help="Base model (if checkpoint is LoRA adapter)")
     parser.add_argument("--epochs", type=int, default=1, help="Training epochs")
     parser.add_argument("--train-data", type=str, 
-                        default="../logical_reasoning/data/curated/logical-reasoning-2017-12-02_qa_pairs_cleaned.json")
+                        default="./rlvr_datasets/train.jsonl",
+                        help="Path to training data (default: ./rlvr_datasets/train.jsonl)")
     parser.add_argument("--output-dir", type=str, default="./checkpoints_trained_srl_rlvr")
     parser.add_argument("--num-rollouts", type=int, default=4, help="Rollouts per prompt (K)")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit dataset size")

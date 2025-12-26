@@ -11,22 +11,14 @@ Usage:
     python train_srl.py [OPTIONS]
 
 Options:
-    --small-model       Use 3B model (default: 7B)
     --epochs N          Number of training epochs (default: 1)
     --train-data PATH   Path to training JSONL (default: ./data/srl_train.jsonl)
     --output-dir PATH   Checkpoint directory (default: ./checkpoints_srl)
     --num-rollouts K    Rollouts per prompt (default: 4)
-    --no-vllm           Disable vLLM, use HF generate instead
 
 Examples:
-    # Train with 3B model for 1 epoch
-    python train_srl.py --small-model
-
     # Train with 7B model for 3 epochs
     python train_srl.py --epochs 3
-
-    # Train without vLLM (fallback)
-    python train_srl.py --small-model --no-vllm
 
 TensorBoard:
     tensorboard --logdir ./checkpoints_srl/logs
@@ -224,7 +216,8 @@ def main():
                         help="vLLM GPU memory utilization (0.0-1.0)")
     
     # Data and output
-    parser.add_argument("--train-data", type=str, default="./data/srl_train.jsonl")
+    parser.add_argument("--train-data", type=str, default="./srl_datasets/train.jsonl",
+                        help="Path to training JSONL (default: ./srl_datasets/train.jsonl)")
     parser.add_argument("--output-dir", type=str, default="./checkpoints_trained_srl")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit dataset size (for testing)")
     

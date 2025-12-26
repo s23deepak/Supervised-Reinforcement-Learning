@@ -4,5 +4,10 @@ srl/hyggingface_tokenizer
 srl/__pycache__/
 srl/checkpoints*
 srl/_ref_policy
+srl/grpo_trainer_lora_model
 srl/*/__pycache__
+srl/raw_datasets/*.json*
+srl/raw_datasets/*.tar.gz
+srl/rlvr_datasets/*.json*
+srl/srl_datasets/*.json*
 .env

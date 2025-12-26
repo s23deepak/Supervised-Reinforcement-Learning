@@ -1,0 +1,2 @@
+# Processed RLVR datasets (QA pairs)
+# Format: JSONL with {question, correct_answer, choices?}

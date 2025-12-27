@@ -29,6 +29,7 @@ import sys
 import argparse
 import gc
 import json
+from pathlib import Path
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -216,7 +217,7 @@ def main():
                         help="vLLM GPU memory utilization (0.0-1.0)")
     
     # Data and output
-    parser.add_argument("--train-data", type=str, default="./srl_datasets/train.jsonl",
+    parser.add_argument("--train-data", type=str, default="./srl_datasets/srl_train.jsonl",
                         help="Path to training JSONL (default: ./srl_datasets/train.jsonl)")
     parser.add_argument("--output-dir", type=str, default="./checkpoints_trained_srl")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit dataset size (for testing)")
@@ -224,6 +225,10 @@ def main():
     # Other
     parser.add_argument("--no-instruction", action="store_true", help="Disable SRL step instruction")
     
+    parser.add_argument("--vllm-server", action="store_true",
+                        help="Use external vLLM server (for LMCache disk caching)")
+    parser.add_argument("--vllm-server-url", type=str, default="http://localhost:8000/v1",
+                        help="vLLM server OpenAI-compatible API URL")
     args = parser.parse_args()
     
     # Handle 4-bit flag
@@ -245,6 +250,9 @@ def main():
     print(f"Max Seq Length: {args.max_seq_length}")
     print(f"Max Completion Length: {args.max_completion_length}")
     print(f"GPU Memory: {args.gpu_memory:.0%}")
+    if args.vllm_server:
+        print(f"vLLM Server Mode: ENABLED")
+        print(f"  Server URL: {args.vllm_server_url}")
     print("=" * 70)
     
     
@@ -347,12 +355,22 @@ def main():
         "save_strategy": "epoch",
         
         # vLLM
-        "use_vllm": True, 
+        "use_vllm": True,
         "vllm_gpu_memory_utilization": args.gpu_memory,
         
         "push_to_hub": False,
     }
     
+    # Configure vLLM server mode if enabled
+    if args.vllm_server:
+        # Parse URL into host and port
+        from urllib.parse import urlparse
+        parsed = urlparse(args.vllm_server_url.replace('/v1', ''))
+        config_kwargs["vllm_mode"] = "server"
+        config_kwargs["vllm_server_host"] = parsed.hostname or "localhost"
+        config_kwargs["vllm_server_port"] = parsed.port or 8000
+        print(f"[vLLM Server Mode] Using external server at {parsed.hostname}:{parsed.port}")
+        print("  Make sure the vLLM server is running: ./start_vllm_server.sh")
     training_args = GRPOConfig(**config_kwargs)
     
     # Create unified logger with comprehensive metrics

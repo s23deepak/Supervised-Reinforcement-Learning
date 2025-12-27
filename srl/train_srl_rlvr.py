@@ -161,6 +161,11 @@ def main():
     parser.add_argument("--num-rollouts", type=int, default=4, help="Rollouts per prompt (K)")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit dataset size")
     parser.add_argument("--no-vllm", action="store_true", help="Disable vLLM")
+    parser.add_argument("--vllm-server", action="store_true",
+                        help="Use external vLLM server (for LMCache disk caching)")
+    parser.add_argument("--vllm-server-url", type=str, default="http://localhost:8000/v1",
+                        help="vLLM server OpenAI-compatible API URL")
+    
     args = parser.parse_args()
     
     print("=" * 70)
@@ -293,6 +298,16 @@ def main():
             "use_vllm": True,
             "vllm_gpu_memory_utilization": 0.7,
         })
+        
+        # Configure vLLM server mode if enabled
+        if args.vllm_server:
+            from urllib.parse import urlparse
+            parsed = urlparse(args.vllm_server_url.replace('/v1', ''))
+            config_kwargs["vllm_mode"] = "server"
+            config_kwargs["vllm_server_host"] = parsed.hostname or "localhost"
+            config_kwargs["vllm_server_port"] = parsed.port or 8000
+            print(f"\n[vLLM Server Mode] Using external server at {parsed.hostname}:{parsed.port}")
+            print("  Make sure the vLLM server is running: ./start_vllm_server.sh")
     
     training_args = GRPOConfig(**config_kwargs)
     

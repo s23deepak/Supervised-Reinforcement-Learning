@@ -1,0 +1,24 @@
+# LMCache Configuration for vLLM Server
+# https://lmcache.ai/docs/integration/vllm
+#
+# This config is used by start_vllm_server.sh for disk-based KV caching.
+# Enables cross-batch KV cache reuse for SRL training.
+
+# Chunk size for KV cache blocks (tokens)
+chunk_size: 256
+
+# Multi-tier caching: GPU -> CPU -> Disk
+local_cpu: true
+
+# Disk cache path (persistent across restarts)
+local_disk: "file:///tmp/lmcache_srl"
+
+# Maximum disk cache size
+max_local_disk_size: 20GB
+
+# Enable pipelined transfers for better throughput
+pipelined_backend: true
+
+# KV connector settings for vLLM
+kv_connector: "LMCacheConnector"
+kv_role: "kv_both"  # Both store and retrieve KV cache

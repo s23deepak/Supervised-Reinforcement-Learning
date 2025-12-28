@@ -38,7 +38,7 @@ import unsloth
 from unsloth import FastLanguageModel, PatchFastRL
 
 import torch
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 
 from trl import GRPOConfig, GRPOTrainer
 
@@ -86,37 +86,41 @@ def load_srl_dataset(data_path: str, tokenizer=None, use_instruction: bool = Tru
     Returns:
         HuggingFace Dataset with prompts and expert actions.
     """
-    samples = []
-    with open(data_path, "r") as f:
-        for line in f:
-            if line.strip():
-                item = json.loads(line)
-                
-                # Build chat messages
-                messages = []
-                if use_instruction:
-                    messages.append({"role": "system", "content": SRL_INSTRUCTION.strip()})
-                messages.append({"role": "user", "content": item["input_prompt"]})
-                
-                # Apply chat template to get prompt
-                prompt = tokenizer.apply_chat_template(
-                        messages, 
-                        tokenize=False, 
-                        add_generation_prompt=True
-                    )                
-                # Extract question prefix for grouping
-                # Use input_prompt (without instruction) since instruction is same for all
-                # First 200 chars of the actual question content
-                question_prefix = item["input_prompt"][:200]
-                samples.append({
-                    "prompt": prompt,
-                    "expert_action": item.get("expert_action", ""),
-                    "question_prefix": question_prefix,
-                })
+    raw_dataset = load_dataset('json', data_files=data_path, split='train')
+    print(f"  Loaded {len(raw_dataset)} samples")
     
-    print(f"  Loaded {len(samples)} samples from {data_path}")
+    def process_example(item):
+        """Process a single example - applied lazily via map()."""
+        messages = []
+        if use_instruction:
+            messages.append({"role": "system", "content": SRL_INSTRUCTION.strip()})
+        messages.append({"role": "user", "content": item["input_prompt"]})
+        
+        # Apply chat template to get prompt
+        prompt = tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True
+        )
+        # Extract question prefix for grouping
+        # Use input_prompt (without instruction) since instruction is same for all
+        # First 200 chars of the actual question content
+        question_prefix = item["input_prompt"][:200]
+        
+        return {
+            "prompt": prompt,
+            "expert_action": item.get("expert_action", ""),
+            "question_prefix": question_prefix,
+        }
+    
+    # Apply processing - batched for speed, removes original columns
+    dataset = raw_dataset.map(
+        process_example,
+        remove_columns=raw_dataset.column_names,
+        desc="Processing samples"
+    )
     print(f"  System prompt: {'enabled' if use_instruction else 'disabled'}")
-    return Dataset.from_list(samples)
+    return dataset
 
 
 def prefix_aware_collate_fn(features, tokenizer):

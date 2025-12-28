@@ -29,7 +29,7 @@ import argparse
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 from unsloth import FastLanguageModel
 from peft import PeftModel
 
@@ -41,22 +41,15 @@ from unified_logger import UnifiedLoggerCallback, patch_trainer, set_global_logg
 
 def load_rlvr_dataset(data_path: str, tokenizer=None) -> Dataset:
     """
-    Load RLVR training data from JSON file.
-    
-    Supports two formats:
-    1. QA pairs with choices: {"qa_pairs": [{"question": ..., "choices": [...], "answer": ...}]}
-    2. OpenAI chat format: [{"messages": [...]}]
+    Load RLVR training data from JSONL file.
     
     Args:
-        data_path: Path to JSON file.
+        data_path: Path to JSONL file with question/correct_answer fields.
         tokenizer: Tokenizer for chat template.
         
     Returns:
         HuggingFace Dataset with prompts and correct answers.
     """
-    with open(data_path, "r") as f:
-        data = json.load(f)
-    
     # System prompt for RLVR
     system_prompt = """You are a helpful assistant for solving logical reasoning problems.
 Solve the problem step by step, then provide your final answer.
@@ -71,79 +64,46 @@ Step 1: ...
 Step 2: ...
 Final Answer: B"""
 
-    samples = []
+    raw_dataset = load_dataset('json', data_files=data_path, split='train')
+    print(f"  Loaded {len(raw_dataset)} samples")
     
-    # Check format: qa_pairs or messages
-    if isinstance(data, dict) and "qa_pairs" in data:
-        # Format 1: QA pairs with choices
-        for item in data["qa_pairs"]:
-            question = item.get("question", "")
-            choices = item.get("choices", [])
-            answer = item.get("answer", "")
-            
-            if not question or not answer:
-                continue
-            
-            # Format question with choices
-            choices_text = "\n".join(choices) if choices else ""
-            full_question = f"{question}\n\nOptions:\n{choices_text}" if choices_text else question
-            
-            # Build chat messages
-            chat_messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": full_question}
-            ]
-            
-            # Apply chat template
-            if tokenizer:
-                prompt = tokenizer.apply_chat_template(
-                    chat_messages,
-                    tokenize=False,
-                    add_generation_prompt=True
-                )
-            else:
-                prompt = f"{system_prompt}\n\nQuestion: {full_question}\n\n"
-            
-            samples.append({
-                "prompt": prompt,
-                "correct_answer": answer,
-            })
-    else:
-        # Format 2: OpenAI messages format (list of items with messages)
-        items = data if isinstance(data, list) else []
-        for item in items:
-            messages = item.get("messages", [])
-            question = None
-            answer = None
-            
-            for msg in messages:
-                if msg["role"] == "user":
-                    question = msg["content"]
-                elif msg["role"] == "assistant":
-                    answer = msg["content"]
-            
-            if question and answer:
-                chat_messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": question}
-                ]
-                
-                if tokenizer:
-                    prompt = tokenizer.apply_chat_template(
-                        chat_messages,
-                        tokenize=False,
-                        add_generation_prompt=True
-                    )
-                else:
-                    prompt = f"{system_prompt}\n\nQuestion: {question}\n\n"
-                
-                samples.append({
-                    "prompt": prompt,
-                    "correct_answer": answer,
-                })
+    def process_example(item):
+        """Process a single example."""
+        question = item.get("question", item.get("input_prompt", ""))
+        answer = item.get("correct_answer", item.get("answer", ""))
+        
+        if not question or not answer:
+            return {"prompt": "", "correct_answer": ""}
+        
+        chat_messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": question}
+        ]
+        
+        if tokenizer:
+            prompt = tokenizer.apply_chat_template(
+                chat_messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        else:
+            prompt = f"{system_prompt}\n\nQuestion: {question}\n\n"
+        
+        return {
+            "prompt": prompt,
+            "correct_answer": answer,
+        }
     
-    print(f"  Loaded {len(samples)} samples from {data_path}")
-    return Dataset.from_list(samples)
+    dataset = raw_dataset.map(
+        process_example,
+        remove_columns=raw_dataset.column_names,
+        desc="Processing samples"
+    )
+    
+    # Filter out empty samples
+    dataset = dataset.filter(lambda x: x["prompt"] != "")
+    
+    return dataset
 
 
 def main():

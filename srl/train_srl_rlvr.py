@@ -166,6 +166,14 @@ def main():
     parser.add_argument("--vllm-server-url", type=str, default="http://localhost:8000/v1",
                         help="vLLM server OpenAI-compatible API URL")
     
+    # HuggingFace Hub
+    parser.add_argument("--push-to-hub", action="store_true",
+                        help="Push model to HuggingFace Hub after training")
+    parser.add_argument("--hub-repo", type=str, default=None,
+                        help="HuggingFace repo name (e.g., 'username/model-name')")
+    parser.add_argument("--hub-token", type=str, default=None,
+                        help="HuggingFace token (or set HF_TOKEN env var)")
+    
     args = parser.parse_args()
     
     print("=" * 70)
@@ -337,10 +345,27 @@ def main():
     final_path = os.path.join(args.output_dir, "final")
     model.save_pretrained(final_path)
     tokenizer.save_pretrained(final_path)
+    print(f"Model saved to: {final_path}")
+    
+    # Push to HuggingFace Hub if requested
+    if args.push_to_hub:
+        if not args.hub_repo:
+            print("Warning: --push-to-hub requires --hub-repo. Skipping push.")
+        else:
+            print(f"\n[Step 8] Pushing to HuggingFace Hub: {args.hub_repo}")
+            try:
+                token = args.hub_token or os.environ.get("HF_TOKEN")
+                model.push_to_hub(args.hub_repo, token=token)
+                tokenizer.push_to_hub(args.hub_repo, token=token)
+                print(f"Model pushed to: https://huggingface.co/{args.hub_repo}")
+            except Exception as e:
+                print(f"Failed to push to hub: {e}")
     
     print("\n" + "=" * 70)
     print("RLVR Training Complete!")
     print(f"Model saved to: {final_path}")
+    if args.push_to_hub and args.hub_repo:
+        print(f"Model on Hub: https://huggingface.co/{args.hub_repo}")
     print("=" * 70)
 
 

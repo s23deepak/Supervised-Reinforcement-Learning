@@ -142,6 +142,10 @@ def main():
     
     use_vllm = not args.no_vllm
     
+    # Auto-detect bf16 support (Ampere+ required)
+    use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    print(f"Using bf16: {use_bf16}" + ("" if use_bf16 else " (GPU doesn't support bf16, using fp16)"))
+    
     # Step 1: Load SRL-pretrained model
     # For RLVR, we load the SRL checkpoint directly (not base + adapter)
     # This preserves Unsloth's vLLM integration including load_lora method
@@ -252,7 +256,8 @@ def main():
         "lr_scheduler_type": "cosine",
         "max_completion_length": 1024, 
         "num_generations": args.num_rollouts,
-        "bf16": True,
+        "bf16": use_bf16,
+        "fp16": not use_bf16,
         "gradient_checkpointing": True,
         "logging_steps": 10,
         "logging_dir": os.path.join(args.output_dir, "logs"),

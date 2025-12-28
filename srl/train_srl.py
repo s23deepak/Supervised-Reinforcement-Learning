@@ -258,6 +258,10 @@ def main():
     print(f"Model: {model_name}")
     print(f"LoRA Rank: {lora_rank}")
     print(f"Load in 4-bit: {load_in_4bit}")
+    
+    # Auto-detect bf16 support (Ampere+ required)
+    use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    print(f"Using bf16: {use_bf16}" + ("" if use_bf16 else " (GPU doesn't support bf16, using fp16)"))
     print(f"Batch Size: {args.batch_size} x {args.grad_accum} (grad accum)")
     print(f"Num Rollouts: {args.num_rollouts}")
     print(f"Max Seq Length: {args.max_seq_length}")
@@ -358,7 +362,8 @@ def main():
         "max_completion_length": args.max_completion_length,
         "temperature": 1.0,
         
-        "bf16": True,
+        "bf16": use_bf16,
+        "fp16": not use_bf16,
         "gradient_checkpointing": True,
         
         # Logging

@@ -18,7 +18,7 @@ CACHE_DIR="${LMCACHE_DIR:-/tmp/lmcache_srl}"
 CACHE_SIZE="${LMCACHE_SIZE:-10GB}"
 
 echo "============================================================"
-echo "Starting vLLM Server with LMCache"
+echo "Starting vLLM Server with LMCache (v1 Connector)"
 echo "============================================================"
 echo "Model:          $MODEL"
 echo "Port:           $PORT"
@@ -30,27 +30,29 @@ echo "============================================================"
 # Create cache directory
 mkdir -p "$CACHE_DIR"
 
-# LMCache configuration via environment variables
-export LMCACHE_LOCAL_CPU="True"
+# LMCache configuration via environment variables (for v0.11+)
+export LMCACHE_USE_EXPERIMENTAL="True"
+export LMCACHE_LOCAL_CPU="False"
 export LMCACHE_LOCAL_DISK="file://${CACHE_DIR}"
 export LMCACHE_MAX_LOCAL_DISK_SIZE="$CACHE_SIZE"
 export LMCACHE_CHUNK_SIZE="256"
 
-# KV transfer config for LMCache connector
+# KV transfer config for LMCache V1 connector (vLLM 0.11+)
 KV_TRANSFER_CONFIG='{
-  "kv_connector": "LMCacheConnector",
+  "kv_connector": "LMCacheConnectorV1",
   "kv_role": "kv_both"
 }'
 
 # Start vLLM with LMCache
 echo ""
-echo "[Starting vLLM server...]"
+echo "[Starting vLLM server with LMCacheConnectorV1...]"
 echo ""
 
 python -m vllm.entrypoints.openai.api_server \
     --model "$MODEL" \
     --port "$PORT" \
     --gpu-memory-utilization "$GPU_MEMORY" \
+    --max-model-len 2048 \
     --enable-prefix-caching \
     --kv-transfer-config "$KV_TRANSFER_CONFIG" \
     --trust-remote-code \

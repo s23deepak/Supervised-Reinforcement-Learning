@@ -1,6 +1,8 @@
 # Supervised Reinforcement Learning (SRL)
 
-Implementation of Supervised Reinforcement Learning (SRL) + RLVR for step-by-step reasoning.
+Implementation of Supervised Reinforcement Learning (SRL) + RLVR for step-by-step reasoning using TRL's GRPOTrainer.
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/s23deepak/Supervised-Reinforcement-Learning/blob/main/notebooks/srl_grpo_tutorial.ipynb)
 
 ## Overview
 
@@ -24,10 +26,11 @@ This approach allows the model to learn the reasoning process itself, not just t
 
 ## Tech Stack
 
-This repository implements the SRL pipeline using:
-- **TRL GRPOTrainer**: GRPO implementation from Hugging Face.
-- **Unsloth**: Memory-efficient LoRA and 4-bit quantization.
-- **vLLM Sleep Mode**: Time-division multiplexing to enable training on GPUs with limited VRAM (e.g., 8GB).
+- **TRL GRPOTrainer**: GRPO implementation from Hugging Face
+- **Unsloth**: Memory-efficient LoRA and 4-bit quantization
+- **vLLM**: Fast inference with prefix caching
+- **LMCache**: Cross-batch KV cache persistence (CPU/disk)
+- **Sleep Mode**: Single-GPU time-division multiplexing
 
 ## Quick Start
 
@@ -50,15 +53,64 @@ python test_model.py --model ./checkpoints_trained_srl_rlvr/final
 
 ```
 srl/
-├── train_srl.py              # Stage 1: SRL training
-├── train_srl_rlvr.py         # Stage 2: RLVR training
-├── srl_reward_function.py    # Step similarity reward (2M/T)
-├── rlvr_reward_function.py   # Final answer correctness (0/1)
-├── unified_logger.py         # TensorBoard, CSV, matplotlib logging
-├── test_model.py             # Model evaluation
-├── sdk_to_srl.py             # Data conversion utility
-└── data/
-    └── srl_train.jsonl       # SRL training data
+├── train_srl.py                  # Stage 1: SRL training
+├── train_srl_rlvr.py             # Stage 2: RLVR training
+├── sleep_aware_grpo_trainer.py   # GRPO with vLLM sleep coordination
+├── vllm_server_client.py         # HTTP client for vLLM sleep/wake
+├── srl_reward_function.py        # Step similarity reward
+├── rlvr_reward_function.py       # Final answer correctness
+├── unified_logger.py             # Comprehensive logging
+├── start_vllm_server.sh          # vLLM server with sleep mode
+└── test_model.py                 # Model evaluation
+```
+
+## Training Modes
+
+### 1. Embedded Mode (Default - Recommended)
+vLLM runs inside training process. Unsloth handles sleep/wake automatically.
+
+```bash
+python train_srl.py --train-data ./data.jsonl
+```
+
+### 2. Server Mode with Sleep Coordination + LMCache
+External vLLM server with coordinated sleep/wake and cross-batch KV caching.
+
+**Why Server Mode?** In SRL, the same question prefix repeats across steps:
+```
+Batch 1: Q               → compute prefix
+Batch 5: Q + S1          → reuse Q prefix (LMCache)
+Batch 9: Q + S1 + S2     → reuse Q + S1 prefix
+```
+LMCache persists KV cache to CPU/disk, enabling reuse across batches (embedded mode only caches within batch).
+
+```bash
+# Terminal 1: Start vLLM server with sleep mode + LMCache
+./start_vllm_server.sh
+
+# Terminal 2: Train with sleep coordination
+python train_srl.py --train-data ./data.jsonl --vllm-server --vllm-sleep-mode
+```
+
+**LMCache Options** (set in `start_vllm_server.sh` or env vars):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LMCACHE_LOCAL_CPU` | True | Use CPU RAM for cache |
+| `LMCACHE_MAX_LOCAL_CPU_SIZE` | 5.0 | CPU cache size (GB) |
+| `LMCACHE_LOCAL_DISK` | file:///tmp/lmcache_srl | Disk cache path |
+| `LMCACHE_MAX_LOCAL_DISK_SIZE` | 10GB | Disk cache size |
+| `LMCACHE_CHUNK_SIZE` | 256 | Tokens per cache chunk |
+
+### 3. Multi-GPU Mode
+Separate GPUs for inference and training (no sleep needed).
+
+```bash
+# Terminal 1: vLLM on GPU 0
+CUDA_VISIBLE_DEVICES=0 ./start_vllm_server.sh
+
+# Terminal 2: Training on GPU 1
+CUDA_VISIBLE_DEVICES=1 python train_srl.py --train-data ./data.jsonl --vllm-server
 ```
 
 ## Training Arguments
@@ -68,6 +120,12 @@ srl/
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--model` | Qwen2.5-3B-Instruct-bnb-4bit | Model name or path |
+| `--train-data` | ./srl_datasets/srl_train.jsonl | Training data path |
+| `--cache-dir` | None | Cache preprocessed dataset |
+| `--vllm-server` | off | Use external vLLM server |
+| `--vllm-sleep-mode` | off | Enable sleep mode coordination |
+| `--push-to-hub` | off | Push model to HuggingFace |
+| `--max-samples` | None | Limit dataset size |
 | `--lora-rank` | 16 | LoRA rank |
 | `--batch-size` | 1 | Per-device batch size |
 | `--grad-accum` | 4 | Gradient accumulation steps |
@@ -84,15 +142,34 @@ srl/
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--srl-checkpoint` | (required) | Path to SRL-trained model |
+| `--train-data` | ./rlvr_datasets/train.jsonl | RLVR training data |
+| `--cache-dir` | None | Cache preprocessed dataset |
 | `--epochs` | 1 | Training epochs |
 | `--max-samples` | None | Limit dataset size |
+
+## Sleep Mode Architecture
+
+`SleepAwareGRPOTrainer` coordinates GPU memory between inference and training:
+
+```
+┌────────────────────────────────────────────────────────────┐
+│ GRPO Step with Sleep Mode                                  │
+├────────────────────────────────────────────────────────────┤
+│ 1. wake_up()     → vLLM uses GPU                          │
+│ 2. Generate      → K completions per prompt               │
+│ 3. sleep()       → Free GPU for training                  │
+│ 4. backward()    → Compute gradients                      │
+│ 5. optimizer     → Update weights                         │
+│ 6. reload()      → vLLM loads new weights                 │
+└────────────────────────────────────────────────────────────┘
+```
 
 ## Logging & Monitoring
 
 Training generates:
-- **TensorBoard**: Real-time metrics in `./checkpoints/logs`
-- **CSV files**: `metrics.csv`, `resource_samples.csv`, `phase_metrics.csv`
-- **Plots**: `resources.png`, `training_curves.png`, `phase_breakdown.png`
+- **TensorBoard**: `./checkpoints/logs`
+- **CSV files**: `metrics.csv`, `resource_samples.csv`
+- **Plots**: `resources.png`, `training_curves.png`
 
 ```bash
 tensorboard --logdir ./checkpoints_trained_srl/logs
@@ -105,7 +182,7 @@ tensorboard --logdir ./checkpoints_trained_srl/logs
 | GPU VRAM | 6GB | 8GB+ |
 | System RAM | 16GB | 32GB+ |
 
-Tested on: NVIDIA RTX 5060 (8GB)
+Tested on: NVIDIA RTX 5060 (8GB), Kaggle T4 x2
 
 ## Data Format
 
@@ -121,45 +198,7 @@ Tested on: NVIDIA RTX 5060 (8GB)
 ### RLVR Training Data (JSON)
 
 ```json
-{
-  "qa_pairs": [
-    {
-      "question": "Four siblings...",
-      "choices": ["A) Bob", "B) Dave", "C) Either", "D) Not enough info"],
-      "answer": "A"
-    }
-  ]
-}
-```
-
-## LMCache Integration (Cross-Batch KV Caching)
-
-For large datasets, use LMCache to persist KV cache to disk for reuse across batches.
-
-**Architecture:**
-```
-TRL Training  ──HTTP API──>  vLLM Server + LMCache (disk cache)
-```
-
-**Usage:**
-```bash
-# Terminal 1: Start vLLM server with LMCache
-cd srl
-./start_vllm_server.sh
-
-# Terminal 2: Train with server mode
-python train_srl.py --vllm-server --train-data ./srl_datasets/train.jsonl
-```
-
-**Flags:**
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--vllm-server` | off | Use external vLLM server |
-| `--vllm-server-url` | `http://localhost:8000/v1` | Server API URL |
-
-**Alternative:** If you prefer config files over env vars:
-```bash
-vllm serve MODEL --lmcache-config lmcache_config.yaml
+{"question": "Four siblings...", "correct_answer": "A"}
 ```
 
 ## References

@@ -29,7 +29,7 @@ import argparse
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
-from datasets import Dataset, load_dataset
+from datasets import Dataset, load_dataset, load_from_disk
 from unsloth import FastLanguageModel
 from peft import PeftModel
 
@@ -39,17 +39,22 @@ from rlvr_reward_function import create_rlvr_reward_function
 from unified_logger import UnifiedLoggerCallback, patch_trainer, set_global_logger
 
 
-def load_rlvr_dataset(data_path: str, tokenizer=None) -> Dataset:
+def load_rlvr_dataset(data_path: str, tokenizer=None, cache_dir: str = None) -> Dataset:
     """
     Load RLVR training data from JSONL file.
     
     Args:
         data_path: Path to JSONL file with question/correct_answer fields.
         tokenizer: Tokenizer for chat template.
+        cache_dir: If provided, save/load processed dataset to/from this directory.
         
     Returns:
         HuggingFace Dataset with prompts and correct answers.
     """
+    # Try to load from cache first
+    if cache_dir and os.path.exists(cache_dir):
+        print(f"  Loading preprocessed dataset from cache: {cache_dir}")
+        return load_from_disk(cache_dir)
     # System prompt for RLVR
     system_prompt = """You are a helpful assistant for solving logical reasoning problems.
 Solve the problem step by step, then provide your final answer.
@@ -94,15 +99,23 @@ Final Answer: B"""
             "correct_answer": answer,
         }
     
+    # Apply processing - multiprocessing for speed
+    num_workers = min(4, os.cpu_count() or 1)
     dataset = raw_dataset.map(
         process_example,
         remove_columns=raw_dataset.column_names,
+        num_proc=num_workers,
+        load_from_cache_file=True,
         desc="Processing samples"
     )
     
     # Filter out empty samples
     dataset = dataset.filter(lambda x: x["prompt"] != "")
     
+    # Save to cache for future runs
+    if cache_dir:
+        print(f"  Saving preprocessed dataset to cache: {cache_dir}")
+        dataset.save_to_disk(cache_dir)
     return dataset
 
 
@@ -120,6 +133,8 @@ def main():
     parser.add_argument("--output-dir", type=str, default="./checkpoints_trained_srl_rlvr")
     parser.add_argument("--num-rollouts", type=int, default=4, help="Rollouts per prompt (K)")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit dataset size")
+    parser.add_argument("--cache-dir", type=str, default=None,
+                        help="Directory to cache preprocessed dataset")
     parser.add_argument("--no-vllm", action="store_true", help="Disable vLLM")
     parser.add_argument("--vllm-server", action="store_true",
                         help="Use external vLLM server (for LMCache disk caching)")
@@ -232,7 +247,7 @@ def main():
     
     # Step 3: Load dataset
     print("\n[Step 3] Loading RLVR dataset...")
-    train_dataset = load_rlvr_dataset(args.train_data, tokenizer=tokenizer)
+    train_dataset = load_rlvr_dataset(args.train_data, tokenizer=tokenizer, cache_dir=args.cache_dir)
     
     if args.max_samples and args.max_samples < len(train_dataset):
         train_dataset = train_dataset.select(range(args.max_samples))

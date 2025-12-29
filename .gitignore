@@ -10,4 +10,5 @@ srl/raw_datasets/*.json*
 srl/raw_datasets/*.tar.gz
 srl/rlvr_datasets/*.json*
 srl/srl_datasets/*.json*
+srl/vllm_server.log
 .env

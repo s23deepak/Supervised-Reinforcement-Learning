@@ -34,3 +34,6 @@ numpy<2.3  # Required for numba compatibility
 
 # PEFT for LoRA
 peft>=0.7.0
+
+#LMCache
+lmcache

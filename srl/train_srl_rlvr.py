@@ -29,7 +29,7 @@ import argparse
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 from unsloth import FastLanguageModel
 from peft import PeftModel
 
@@ -41,22 +41,15 @@ from unified_logger import UnifiedLoggerCallback, patch_trainer, set_global_logg
 
 def load_rlvr_dataset(data_path: str, tokenizer=None) -> Dataset:
     """
-    Load RLVR training data from JSON file.
-    
-    Supports two formats:
-    1. QA pairs with choices: {"qa_pairs": [{"question": ..., "choices": [...], "answer": ...}]}
-    2. OpenAI chat format: [{"messages": [...]}]
+    Load RLVR training data from JSONL file.
     
     Args:
-        data_path: Path to JSON file.
+        data_path: Path to JSONL file with question/correct_answer fields.
         tokenizer: Tokenizer for chat template.
         
     Returns:
         HuggingFace Dataset with prompts and correct answers.
     """
-    with open(data_path, "r") as f:
-        data = json.load(f)
-    
     # System prompt for RLVR
     system_prompt = """You are a helpful assistant for solving logical reasoning problems.
 Solve the problem step by step, then provide your final answer.
@@ -71,79 +64,46 @@ Step 1: ...
 Step 2: ...
 Final Answer: B"""
 
-    samples = []
+    raw_dataset = load_dataset('json', data_files=data_path, split='train')
+    print(f"  Loaded {len(raw_dataset)} samples")
     
-    # Check format: qa_pairs or messages
-    if isinstance(data, dict) and "qa_pairs" in data:
-        # Format 1: QA pairs with choices
-        for item in data["qa_pairs"]:
-            question = item.get("question", "")
-            choices = item.get("choices", [])
-            answer = item.get("answer", "")
-            
-            if not question or not answer:
-                continue
-            
-            # Format question with choices
-            choices_text = "\n".join(choices) if choices else ""
-            full_question = f"{question}\n\nOptions:\n{choices_text}" if choices_text else question
-            
-            # Build chat messages
-            chat_messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": full_question}
-            ]
-            
-            # Apply chat template
-            if tokenizer:
-                prompt = tokenizer.apply_chat_template(
-                    chat_messages,
-                    tokenize=False,
-                    add_generation_prompt=True
-                )
-            else:
-                prompt = f"{system_prompt}\n\nQuestion: {full_question}\n\n"
-            
-            samples.append({
-                "prompt": prompt,
-                "correct_answer": answer,
-            })
-    else:
-        # Format 2: OpenAI messages format (list of items with messages)
-        items = data if isinstance(data, list) else []
-        for item in items:
-            messages = item.get("messages", [])
-            question = None
-            answer = None
-            
-            for msg in messages:
-                if msg["role"] == "user":
-                    question = msg["content"]
-                elif msg["role"] == "assistant":
-                    answer = msg["content"]
-            
-            if question and answer:
-                chat_messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": question}
-                ]
-                
-                if tokenizer:
-                    prompt = tokenizer.apply_chat_template(
-                        chat_messages,
-                        tokenize=False,
-                        add_generation_prompt=True
-                    )
-                else:
-                    prompt = f"{system_prompt}\n\nQuestion: {question}\n\n"
-                
-                samples.append({
-                    "prompt": prompt,
-                    "correct_answer": answer,
-                })
+    def process_example(item):
+        """Process a single example."""
+        question = item.get("question", item.get("input_prompt", ""))
+        answer = item.get("correct_answer", item.get("answer", ""))
+        
+        if not question or not answer:
+            return {"prompt": "", "correct_answer": ""}
+        
+        chat_messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": question}
+        ]
+        
+        if tokenizer:
+            prompt = tokenizer.apply_chat_template(
+                chat_messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        else:
+            prompt = f"{system_prompt}\n\nQuestion: {question}\n\n"
+        
+        return {
+            "prompt": prompt,
+            "correct_answer": answer,
+        }
     
-    print(f"  Loaded {len(samples)} samples from {data_path}")
-    return Dataset.from_list(samples)
+    dataset = raw_dataset.map(
+        process_example,
+        remove_columns=raw_dataset.column_names,
+        desc="Processing samples"
+    )
+    
+    # Filter out empty samples
+    dataset = dataset.filter(lambda x: x["prompt"] != "")
+    
+    return dataset
 
 
 def main():
@@ -155,11 +115,25 @@ def main():
                         help="Base model (if checkpoint is LoRA adapter)")
     parser.add_argument("--epochs", type=int, default=1, help="Training epochs")
     parser.add_argument("--train-data", type=str, 
-                        default="../logical_reasoning/data/curated/logical-reasoning-2017-12-02_qa_pairs_cleaned.json")
+                        default="./rlvr_datasets/train.jsonl",
+                        help="Path to training data (default: ./rlvr_datasets/train.jsonl)")
     parser.add_argument("--output-dir", type=str, default="./checkpoints_trained_srl_rlvr")
     parser.add_argument("--num-rollouts", type=int, default=4, help="Rollouts per prompt (K)")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit dataset size")
     parser.add_argument("--no-vllm", action="store_true", help="Disable vLLM")
+    parser.add_argument("--vllm-server", action="store_true",
+                        help="Use external vLLM server (for LMCache disk caching)")
+    parser.add_argument("--vllm-server-url", type=str, default="http://localhost:8000/v1",
+                        help="vLLM server OpenAI-compatible API URL")
+    
+    # HuggingFace Hub
+    parser.add_argument("--push-to-hub", action="store_true",
+                        help="Push model to HuggingFace Hub after training")
+    parser.add_argument("--hub-repo", type=str, default=None,
+                        help="HuggingFace repo name (e.g., 'username/model-name')")
+    parser.add_argument("--hub-token", type=str, default=None,
+                        help="HuggingFace token (or set HF_TOKEN env var)")
+    
     args = parser.parse_args()
     
     print("=" * 70)
@@ -167,6 +141,10 @@ def main():
     print("=" * 70)
     
     use_vllm = not args.no_vllm
+    
+    # Auto-detect bf16 support (Ampere+ required)
+    use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    print(f"Using bf16: {use_bf16}" + ("" if use_bf16 else " (GPU doesn't support bf16, using fp16)"))
     
     # Step 1: Load SRL-pretrained model
     # For RLVR, we load the SRL checkpoint directly (not base + adapter)
@@ -278,7 +256,8 @@ def main():
         "lr_scheduler_type": "cosine",
         "max_completion_length": 1024, 
         "num_generations": args.num_rollouts,
-        "bf16": True,
+        "bf16": use_bf16,
+        "fp16": not use_bf16,
         "gradient_checkpointing": True,
         "logging_steps": 10,
         "logging_dir": os.path.join(args.output_dir, "logs"),
@@ -292,6 +271,16 @@ def main():
             "use_vllm": True,
             "vllm_gpu_memory_utilization": 0.7,
         })
+        
+        # Configure vLLM server mode if enabled
+        if args.vllm_server:
+            from urllib.parse import urlparse
+            parsed = urlparse(args.vllm_server_url.replace('/v1', ''))
+            config_kwargs["vllm_mode"] = "server"
+            config_kwargs["vllm_server_host"] = parsed.hostname or "localhost"
+            config_kwargs["vllm_server_port"] = parsed.port or 8000
+            print(f"\n[vLLM Server Mode] Using external server at {parsed.hostname}:{parsed.port}")
+            print("  Make sure the vLLM server is running: ./start_vllm_server.sh")
     
     training_args = GRPOConfig(**config_kwargs)
     
@@ -321,10 +310,27 @@ def main():
     final_path = os.path.join(args.output_dir, "final")
     model.save_pretrained(final_path)
     tokenizer.save_pretrained(final_path)
+    print(f"Model saved to: {final_path}")
+    
+    # Push to HuggingFace Hub if requested
+    if args.push_to_hub:
+        if not args.hub_repo:
+            print("Warning: --push-to-hub requires --hub-repo. Skipping push.")
+        else:
+            print(f"\n[Step 8] Pushing to HuggingFace Hub: {args.hub_repo}")
+            try:
+                token = args.hub_token or os.environ.get("HF_TOKEN")
+                model.push_to_hub(args.hub_repo, token=token)
+                tokenizer.push_to_hub(args.hub_repo, token=token)
+                print(f"Model pushed to: https://huggingface.co/{args.hub_repo}")
+            except Exception as e:
+                print(f"Failed to push to hub: {e}")
     
     print("\n" + "=" * 70)
     print("RLVR Training Complete!")
     print(f"Model saved to: {final_path}")
+    if args.push_to_hub and args.hub_repo:
+        print(f"Model on Hub: https://huggingface.co/{args.hub_repo}")
     print("=" * 70)
 
 

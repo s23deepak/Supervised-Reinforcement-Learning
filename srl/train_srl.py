@@ -11,22 +11,14 @@ Usage:
     python train_srl.py [OPTIONS]
 
 Options:
-    --small-model       Use 3B model (default: 7B)
     --epochs N          Number of training epochs (default: 1)
     --train-data PATH   Path to training JSONL (default: ./data/srl_train.jsonl)
     --output-dir PATH   Checkpoint directory (default: ./checkpoints_srl)
     --num-rollouts K    Rollouts per prompt (default: 4)
-    --no-vllm           Disable vLLM, use HF generate instead
 
 Examples:
-    # Train with 3B model for 1 epoch
-    python train_srl.py --small-model
-
     # Train with 7B model for 3 epochs
     python train_srl.py --epochs 3
-
-    # Train without vLLM (fallback)
-    python train_srl.py --small-model --no-vllm
 
 TensorBoard:
     tensorboard --logdir ./checkpoints_srl/logs
@@ -37,6 +29,7 @@ import sys
 import argparse
 import gc
 import json
+from pathlib import Path
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -45,7 +38,7 @@ import unsloth
 from unsloth import FastLanguageModel, PatchFastRL
 
 import torch
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 
 from trl import GRPOConfig, GRPOTrainer
 
@@ -93,37 +86,41 @@ def load_srl_dataset(data_path: str, tokenizer=None, use_instruction: bool = Tru
     Returns:
         HuggingFace Dataset with prompts and expert actions.
     """
-    samples = []
-    with open(data_path, "r") as f:
-        for line in f:
-            if line.strip():
-                item = json.loads(line)
-                
-                # Build chat messages
-                messages = []
-                if use_instruction:
-                    messages.append({"role": "system", "content": SRL_INSTRUCTION.strip()})
-                messages.append({"role": "user", "content": item["input_prompt"]})
-                
-                # Apply chat template to get prompt
-                prompt = tokenizer.apply_chat_template(
-                        messages, 
-                        tokenize=False, 
-                        add_generation_prompt=True
-                    )                
-                # Extract question prefix for grouping
-                # Use input_prompt (without instruction) since instruction is same for all
-                # First 200 chars of the actual question content
-                question_prefix = item["input_prompt"][:200]
-                samples.append({
-                    "prompt": prompt,
-                    "expert_action": item.get("expert_action", ""),
-                    "question_prefix": question_prefix,
-                })
+    raw_dataset = load_dataset('json', data_files=data_path, split='train')
+    print(f"  Loaded {len(raw_dataset)} samples")
     
-    print(f"  Loaded {len(samples)} samples from {data_path}")
+    def process_example(item):
+        """Process a single example - applied lazily via map()."""
+        messages = []
+        if use_instruction:
+            messages.append({"role": "system", "content": SRL_INSTRUCTION.strip()})
+        messages.append({"role": "user", "content": item["input_prompt"]})
+        
+        # Apply chat template to get prompt
+        prompt = tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True
+        )
+        # Extract question prefix for grouping
+        # Use input_prompt (without instruction) since instruction is same for all
+        # First 200 chars of the actual question content
+        question_prefix = item["input_prompt"][:200]
+        
+        return {
+            "prompt": prompt,
+            "expert_action": item.get("expert_action", ""),
+            "question_prefix": question_prefix,
+        }
+    
+    # Apply processing - batched for speed, removes original columns
+    dataset = raw_dataset.map(
+        process_example,
+        remove_columns=raw_dataset.column_names,
+        desc="Processing samples"
+    )
     print(f"  System prompt: {'enabled' if use_instruction else 'disabled'}")
-    return Dataset.from_list(samples)
+    return dataset
 
 
 def prefix_aware_collate_fn(features, tokenizer):
@@ -224,12 +221,26 @@ def main():
                         help="vLLM GPU memory utilization (0.0-1.0)")
     
     # Data and output
-    parser.add_argument("--train-data", type=str, default="./data/srl_train.jsonl")
+    parser.add_argument("--train-data", type=str, default="./srl_datasets/srl_train.jsonl",
+                        help="Path to training JSONL (default: ./srl_datasets/train.jsonl)")
     parser.add_argument("--output-dir", type=str, default="./checkpoints_trained_srl")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit dataset size (for testing)")
     
     # Other
     parser.add_argument("--no-instruction", action="store_true", help="Disable SRL step instruction")
+    
+    parser.add_argument("--vllm-server", action="store_true",
+                        help="Use external vLLM server (for LMCache disk caching)")
+    parser.add_argument("--vllm-server-url", type=str, default="http://localhost:8000/v1",
+                        help="vLLM server OpenAI-compatible API URL")
+    
+    # HuggingFace Hub
+    parser.add_argument("--push-to-hub", action="store_true",
+                        help="Push model to HuggingFace Hub after training")
+    parser.add_argument("--hub-repo", type=str, default=None,
+                        help="HuggingFace repo name (e.g., 'username/model-name')")
+    parser.add_argument("--hub-token", type=str, default=None,
+                        help="HuggingFace token (or set HF_TOKEN env var)")
     
     args = parser.parse_args()
     
@@ -247,11 +258,18 @@ def main():
     print(f"Model: {model_name}")
     print(f"LoRA Rank: {lora_rank}")
     print(f"Load in 4-bit: {load_in_4bit}")
+    
+    # Auto-detect bf16 support (Ampere+ required)
+    use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    print(f"Using bf16: {use_bf16}" + ("" if use_bf16 else " (GPU doesn't support bf16, using fp16)"))
     print(f"Batch Size: {args.batch_size} x {args.grad_accum} (grad accum)")
     print(f"Num Rollouts: {args.num_rollouts}")
     print(f"Max Seq Length: {args.max_seq_length}")
     print(f"Max Completion Length: {args.max_completion_length}")
     print(f"GPU Memory: {args.gpu_memory:.0%}")
+    if args.vllm_server:
+        print(f"vLLM Server Mode: ENABLED")
+        print(f"  Server URL: {args.vllm_server_url}")
     print("=" * 70)
     
     
@@ -344,7 +362,8 @@ def main():
         "max_completion_length": args.max_completion_length,
         "temperature": 1.0,
         
-        "bf16": True,
+        "bf16": use_bf16,
+        "fp16": not use_bf16,
         "gradient_checkpointing": True,
         
         # Logging
@@ -354,12 +373,22 @@ def main():
         "save_strategy": "epoch",
         
         # vLLM
-        "use_vllm": True, 
+        "use_vllm": True,
         "vllm_gpu_memory_utilization": args.gpu_memory,
         
         "push_to_hub": False,
     }
     
+    # Configure vLLM server mode if enabled
+    if args.vllm_server:
+        # Parse URL into host and port
+        from urllib.parse import urlparse
+        parsed = urlparse(args.vllm_server_url.replace('/v1', ''))
+        config_kwargs["vllm_mode"] = "server"
+        config_kwargs["vllm_server_host"] = parsed.hostname or "localhost"
+        config_kwargs["vllm_server_port"] = parsed.port or 8000
+        print(f"[vLLM Server Mode] Using external server at {parsed.hostname}:{parsed.port}")
+        print("  Make sure the vLLM server is running: ./start_vllm_server.sh")
     training_args = GRPOConfig(**config_kwargs)
     
     # Create unified logger with comprehensive metrics
@@ -402,10 +431,27 @@ def main():
     final_path = os.path.join(args.output_dir, "final")
     model.save_pretrained(final_path)
     tokenizer.save_pretrained(final_path)
+    print(f"Model saved to: {final_path}")
+    
+    # Push to HuggingFace Hub if requested
+    if args.push_to_hub:
+        if not args.hub_repo:
+            print("Warning: --push-to-hub requires --hub-repo. Skipping push.")
+        else:
+            print(f"\n[Step 9] Pushing to HuggingFace Hub: {args.hub_repo}")
+            try:
+                token = args.hub_token or os.environ.get("HF_TOKEN")
+                model.push_to_hub(args.hub_repo, token=token)
+                tokenizer.push_to_hub(args.hub_repo, token=token)
+                print(f"Model pushed to: https://huggingface.co/{args.hub_repo}")
+            except Exception as e:
+                print(f"Failed to push to hub: {e}")
     
     print("\n" + "=" * 70)
     print("Training Complete!")
     print(f"Model saved to: {final_path}")
+    if args.push_to_hub and args.hub_repo:
+        print(f"Model on Hub: https://huggingface.co/{args.hub_repo}")
     print("=" * 70)
     
     # Cleanup

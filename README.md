@@ -132,12 +132,43 @@ Tested on: NVIDIA RTX 5060 (8GB)
 }
 ```
 
+## LMCache Integration (Cross-Batch KV Caching)
+
+For large datasets, use LMCache to persist KV cache to disk for reuse across batches.
+
+**Architecture:**
+```
+TRL Training  ──HTTP API──>  vLLM Server + LMCache (disk cache)
+```
+
+**Usage:**
+```bash
+# Terminal 1: Start vLLM server with LMCache
+cd srl
+./start_vllm_server.sh
+
+# Terminal 2: Train with server mode
+python train_srl.py --vllm-server --train-data ./srl_datasets/train.jsonl
+```
+
+**Flags:**
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--vllm-server` | off | Use external vLLM server |
+| `--vllm-server-url` | `http://localhost:8000/v1` | Server API URL |
+
+**Alternative:** If you prefer config files over env vars:
+```bash
+vllm serve MODEL --lmcache-config lmcache_config.yaml
+```
+
 ## References
 
 - [SRL Paper](https://arxiv.org/abs/2510.25992) - Google
 - [TRL Documentation](https://huggingface.co/docs/trl)
 - [Unsloth AI](https://github.com/unslothai/unsloth)
 - [vLLM](https://github.com/vllm-project/vllm)
+- [LMCache](https://lmcache.ai)
 
 ## License
 

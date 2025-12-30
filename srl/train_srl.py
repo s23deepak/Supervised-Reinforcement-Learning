@@ -38,7 +38,7 @@ import unsloth
 from unsloth import FastLanguageModel, PatchFastRL
 
 import torch
-from datasets import Dataset, load_dataset, load_from_disk, save_to_disk
+from datasets import Dataset, load_dataset, load_from_disk
 
 from trl import GRPOConfig, GRPOTrainer
 from sleep_aware_grpo_trainer import SleepAwareGRPOTrainer
@@ -93,7 +93,14 @@ def load_srl_dataset(data_path: str, tokenizer=None, use_instruction: bool = Tru
     if cache_dir and os.path.exists(cache_dir):
         print(f"  Loading preprocessed dataset from cache: {cache_dir}")
         return load_from_disk(cache_dir)
-    raw_dataset = load_dataset('json', data_files=data_path, split='train')
+    
+    # Support sharded datasets (directory with *.jsonl files)
+    if os.path.isdir(data_path):
+        shard_pattern = os.path.join(data_path, "*.jsonl")
+        print(f"  Loading sharded dataset from: {shard_pattern}")
+        raw_dataset = load_dataset('json', data_files=shard_pattern, split='train')
+    else:
+        raw_dataset = load_dataset('json', data_files=data_path, split='train')
     print(f"  Loaded {len(raw_dataset)} samples")
     
     def process_example(item):
@@ -120,16 +127,19 @@ def load_srl_dataset(data_path: str, tokenizer=None, use_instruction: bool = Tru
             "question_prefix": question_prefix,
         }
     
-    # Apply processing - batch and multiprocessing for speed, removes original columns
+    # Apply processing - disable auto-caching to avoid disk explosion
+    # (8GB JSONL can expand to 50GB+ with chat templates)
     num_workers = min(4, os.cpu_count() or 1)
     dataset = raw_dataset.map(
         process_example,
         remove_columns=raw_dataset.column_names,
         num_proc=num_workers,
-        load_from_cache_file=True,  # Cache processed result
+        keep_in_memory=True,  # Don't write intermediate Arrow files
+        load_from_cache_file=False,  # Don't use HF auto-cache
         desc="Processing samples"
     )
-    # Save to cache for future runs
+    
+    # Only save to disk if cache_dir explicitly provided
     if cache_dir:
         print(f"  Saving preprocessed dataset to cache: {cache_dir}")
         dataset.save_to_disk(cache_dir)

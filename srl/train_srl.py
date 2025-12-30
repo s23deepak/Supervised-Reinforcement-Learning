@@ -38,12 +38,14 @@ import unsloth
 from unsloth import FastLanguageModel, PatchFastRL
 
 import torch
-from datasets import Dataset, load_dataset
+from datasets import Dataset, load_dataset, load_from_disk
 
 from trl import GRPOConfig, GRPOTrainer
+from sleep_aware_grpo_trainer import SleepAwareGRPOTrainer
 
 from srl_reward_function import SRLRewardFunction
 from unified_logger import UnifiedLoggerCallback, patch_trainer, set_global_logger, log_samples
+from vllm_server_client import VLLMServerClient, VLLMSleepModeCallback
 from functools import partial
 
 # SRL instruction: tell model to think first, then generate step
@@ -74,7 +76,7 @@ EXAMPLES:
 """
 
 
-def load_srl_dataset(data_path: str, tokenizer=None, use_instruction: bool = True) -> Dataset:
+def load_srl_dataset(data_path: str, tokenizer=None, use_instruction: bool = True, cache_dir: str = None) -> Dataset:
     """
     Load SRL training data from JSONL file.
     
@@ -82,11 +84,23 @@ def load_srl_dataset(data_path: str, tokenizer=None, use_instruction: bool = Tru
         data_path: Path to JSONL file.
         tokenizer: Tokenizer to apply chat template.
         use_instruction: Whether to use SRL instruction as system prompt.
+        cache_dir: If provided, save/load processed dataset to/from this directory.
         
     Returns:
         HuggingFace Dataset with prompts and expert actions.
-    """
-    raw_dataset = load_dataset('json', data_files=data_path, split='train')
+    """    
+    # Try to load from cache first
+    if cache_dir and os.path.exists(cache_dir):
+        print(f"  Loading preprocessed dataset from cache: {cache_dir}")
+        return load_from_disk(cache_dir)
+    
+    # Support sharded datasets (directory with *.jsonl files)
+    if os.path.isdir(data_path):
+        shard_pattern = os.path.join(data_path, "*.jsonl")
+        print(f"  Loading sharded dataset from: {shard_pattern}")
+        raw_dataset = load_dataset('json', data_files=shard_pattern, split='train')
+    else:
+        raw_dataset = load_dataset('json', data_files=data_path, split='train')
     print(f"  Loaded {len(raw_dataset)} samples")
     
     def process_example(item):
@@ -113,12 +127,22 @@ def load_srl_dataset(data_path: str, tokenizer=None, use_instruction: bool = Tru
             "question_prefix": question_prefix,
         }
     
-    # Apply processing - batched for speed, removes original columns
+    # Apply processing - disable auto-caching to avoid disk explosion
+    # (8GB JSONL can expand to 50GB+ with chat templates)
+    num_workers = min(4, os.cpu_count() or 1)
     dataset = raw_dataset.map(
         process_example,
         remove_columns=raw_dataset.column_names,
+        num_proc=num_workers,
+        keep_in_memory=True,  # Don't write intermediate Arrow files
+        load_from_cache_file=False,  # Don't use HF auto-cache
         desc="Processing samples"
     )
+    
+    # Only save to disk if cache_dir explicitly provided
+    if cache_dir:
+        print(f"  Saving preprocessed dataset to cache: {cache_dir}")
+        dataset.save_to_disk(cache_dir)
     print(f"  System prompt: {'enabled' if use_instruction else 'disabled'}")
     return dataset
 
@@ -225,6 +249,8 @@ def main():
                         help="Path to training JSONL (default: ./srl_datasets/train.jsonl)")
     parser.add_argument("--output-dir", type=str, default="./checkpoints_trained_srl")
     parser.add_argument("--max-samples", type=int, default=None, help="Limit dataset size (for testing)")
+    parser.add_argument("--cache-dir", type=str, default=None,
+                        help="Directory to cache preprocessed dataset (speeds up subsequent runs)")
     
     # Other
     parser.add_argument("--no-instruction", action="store_true", help="Disable SRL step instruction")
@@ -233,6 +259,8 @@ def main():
                         help="Use external vLLM server (for LMCache disk caching)")
     parser.add_argument("--vllm-server-url", type=str, default="http://localhost:8000/v1",
                         help="vLLM server OpenAI-compatible API URL")
+    parser.add_argument("--vllm-sleep-mode", action="store_true",
+                        help="Enable sleep mode coordination with vLLM server")
     
     # HuggingFace Hub
     parser.add_argument("--push-to-hub", action="store_true",
@@ -329,7 +357,8 @@ def main():
     train_dataset = load_srl_dataset(
         args.train_data, 
         tokenizer=tokenizer,
-        use_instruction=not args.no_instruction
+        use_instruction=not args.no_instruction,
+        cache_dir=args.cache_dir
     )
     
     # Limit dataset size for testing
@@ -389,6 +418,15 @@ def main():
         config_kwargs["vllm_server_port"] = parsed.port or 8000
         print(f"[vLLM Server Mode] Using external server at {parsed.hostname}:{parsed.port}")
         print("  Make sure the vLLM server is running: ./start_vllm_server.sh")
+    # Initialize vLLM sleep mode client if enabled
+    vllm_client = None
+    if args.vllm_server and args.vllm_sleep_mode:
+        vllm_client = VLLMServerClient(args.vllm_server_url)
+        if vllm_client.wait_for_ready():
+            print("[vLLM Sleep Mode] Sleep/wake coordination enabled")
+        else:
+            print("[WARNING] vLLM server not responding, sleep mode disabled")
+            vllm_client = None
     training_args = GRPOConfig(**config_kwargs)
     
     # Create unified logger with comprehensive metrics
@@ -405,15 +443,31 @@ def main():
     # Create prefix-aware collator for KV-cache optimization
     collator = partial(prefix_aware_collate_fn, tokenizer=tokenizer)
     
-    trainer = GRPOTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        reward_funcs=reward_fn,
-        tokenizer=tokenizer,
-        callbacks=[logger_callback],
-        data_collator=collator,
-    )
+    # Build callbacks list
+    callbacks = [logger_callback]
+    # Use SleepAwareGRPOTrainer if sleep mode is enabled
+    if vllm_client:
+        print("[vLLM Sleep Mode] Using SleepAwareGRPOTrainer")
+        trainer = SleepAwareGRPOTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            reward_funcs=reward_fn,
+            tokenizer=tokenizer,
+            callbacks=callbacks,
+            data_collator=collator,
+            vllm_server_client=vllm_client,
+        )
+    else:
+        trainer = GRPOTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            reward_funcs=reward_fn,
+            tokenizer=tokenizer,
+            callbacks=callbacks,
+            data_collator=collator,
+        )
     
    
     

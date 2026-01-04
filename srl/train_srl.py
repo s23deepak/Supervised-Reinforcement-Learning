@@ -222,7 +222,7 @@ def main():
     )
     
     # Model configuration
-    parser.add_argument("--model", type=str, default="unsloth/Qwen2.5-3B-Instruct-bnb-4bit",
+    parser.add_argument("--model", type=str, default="unsloth/Qwen2.5-1.5B-Instruct-bnb-4bit",
                         help="Model name or path (HuggingFace or local)")
     parser.add_argument("--lora-rank", type=int, default=16, help="LoRA rank (r)")
     parser.add_argument("--load-in-4bit", action="store_true", default=True,
@@ -261,6 +261,8 @@ def main():
                         help="vLLM server OpenAI-compatible API URL")
     parser.add_argument("--vllm-sleep-mode", action="store_true",
                         help="Enable sleep mode coordination with vLLM server")
+    parser.add_argument("--use-lmcache", action="store_true",
+                        help="Enable LMCache for cross-batch KV caching in embedded mode")
     
     # HuggingFace Hub
     parser.add_argument("--push-to-hub", action="store_true",
@@ -311,6 +313,19 @@ def main():
     
     print("\n[Step 2] Loading model...")
     
+    # Configure LMCache if enabled
+    kv_transfer_config = None
+    if args.use_lmcache:
+        os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
+        os.environ["LMCACHE_LOCAL_CPU"] = "True"
+        os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5.0"
+        os.environ["LMCACHE_ASYNC_OFFLOAD"] = "True"
+        os.environ["LMCACHE_OFFLOAD_PATH"] = "/tmp"
+        kv_transfer_config = {
+            "kv_connector": "LMCacheConnectorV1",
+            "kv_role": "kv_both",
+        }
+        print("LMCache enabled for cross-batch KV caching")
     # Load with vLLM for fast inference
     try:
         model, tokenizer = FastLanguageModel.from_pretrained(
@@ -322,6 +337,7 @@ def main():
             # Enable prefix caching for KV-cache reuse
             # When prompts share a common prefix (same question and previous steps),
             enable_prefix_caching=True,
+            kv_transfer_config=kv_transfer_config,  # LMCache support
         )
         print("Model loaded with vLLM")
     except Exception as e:

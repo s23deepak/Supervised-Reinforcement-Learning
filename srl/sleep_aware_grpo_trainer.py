@@ -34,7 +34,7 @@ class SleepAwareGRPOTrainer(GRPOTrainer):
     Key changes from base GRPOTrainer:
     1. Wakes vLLM before generation
     2. Sleeps vLLM before backward pass
-    3. Reloads weights after optimizer step
+    3. Reloads weights only after optimizer actually steps
     
     This enables sharing a single GPU between vLLM inference and model training.
     """
@@ -58,9 +58,12 @@ class SleepAwareGRPOTrainer(GRPOTrainer):
         self.vllm_server_client = vllm_server_client
         self.sleep_level = sleep_level
         self._server_sleeping = False
+        self._accumulation_count = 0
         
         if self.vllm_server_client:
             print("[SleepAwareGRPOTrainer] External vLLM sleep mode enabled")
+            print(f"  Sleep level: {sleep_level}")
+            print(f"  Gradient accumulation: {self.args.gradient_accumulation_steps}")
     
     def _ensure_vllm_awake(self):
         """Wake up vLLM server if sleeping."""
@@ -75,7 +78,7 @@ class SleepAwareGRPOTrainer(GRPOTrainer):
             self._server_sleeping = True
     
     def _reload_vllm_weights(self):
-        """Reload updated weights into vLLM after training step."""
+        """Reload updated weights into vLLM after optimizer step."""
         if self.vllm_server_client:
             # Wake up weights memory first
             self.vllm_server_client.wake_up(tags="weights")
@@ -102,26 +105,34 @@ class SleepAwareGRPOTrainer(GRPOTrainer):
         """
         Override to add sleep/wake around backward pass.
         
+        OPTIMIZED: Only reload weights after actual optimizer step,
+        not after every gradient accumulation step.
+        
         Flow:
         1. _prepare_inputs already woke vLLM (generation done)
-        2. Sleep vLLM to free GPU memory
+        2. Sleep vLLM on FIRST accumulation step only
         3. Do forward/backward pass
-        4. Wake and reload weights
+        4. Reload weights only when optimizer steps
         """
-        # Sleep vLLM before training computation
-        self._sleep_vllm()
+        grad_accum = self.args.gradient_accumulation_steps
         
-        # Clear GPU cache before training
-        if self.vllm_server_client:
-            torch.cuda.empty_cache()
+        # Sleep vLLM only on first accumulation step
+        if self._accumulation_count == 0:
+            self._sleep_vllm()
+            if self.vllm_server_client:
+                torch.cuda.empty_cache()
         
-        # Call parent training step (forward + backward + optimizer)
-        try:
-            loss = super().training_step(model, inputs, num_items_in_batch)
-        finally:
-            # Always reload weights after training step
+        # Track accumulation
+        self._accumulation_count += 1       
+        # Call parent training step (forward + backward)
+        loss = super().training_step(model, inputs, num_items_in_batch)
+        
+        # Reload weights only after optimizer actually steps
+        # (i.e., after gradient_accumulation_steps backward passes)
+        if self._accumulation_count >= grad_accum:
             if self.vllm_server_client:
                 self._reload_vllm_weights()
+            self._accumulation_count = 0
         
         return loss
     

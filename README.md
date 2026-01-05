@@ -98,11 +98,39 @@ python train_srl.py --train-data ./data.jsonl --vllm-server --vllm-sleep-mode
 |----------|---------|-------------|
 | `LMCACHE_LOCAL_CPU` | True | Use CPU RAM for cache |
 | `LMCACHE_MAX_LOCAL_CPU_SIZE` | 5.0 | CPU cache size (GB) |
+
+### 3. Embedded Mode with LMCache (Experimental)
+
+Enable cross-batch KV caching directly in embedded mode without a separate server:
+
+```bash
+python train_srl.py --train-data ./data.jsonl --use-lmcache
+```
+
+This requires a modified version of `unsloth-zoo` that exposes `kv_transfer_config` to vLLM.
+
+**Using the Modified Unsloth-Zoo:**
+```bash
+# Install from the feature branch
+pip install git+https://github.com/YOUR_USERNAME/unsloth-zoo.git@feature/lmcache-embedded-mode
+```
+
+> **Note:** This feature is pending PR to [unslothai/unsloth-zoo](https://github.com/unslothai/unsloth-zoo).
+> The change adds `kv_transfer_config` parameter to `load_vllm()` in `vllm_utils.py`.
+
+**When LMCache Helps:**
+- Same question prefix repeats across batches
+- Large datasets with repeating patterns
+- Multi-epoch training
+
+**When It Doesn't Help:**
+- Fully shuffled datasets with no prefix overlap
+- Small datasets that fit in vLLM's built-in prefix cache
 | `LMCACHE_LOCAL_DISK` | file:///tmp/lmcache_srl | Disk cache path |
 | `LMCACHE_MAX_LOCAL_DISK_SIZE` | 10GB | Disk cache size |
 | `LMCACHE_CHUNK_SIZE` | 256 | Tokens per cache chunk |
 
-### 3. Multi-GPU Mode
+### 4. Multi-GPU Mode
 Separate GPUs for inference and training (no sleep needed).
 
 ```bash

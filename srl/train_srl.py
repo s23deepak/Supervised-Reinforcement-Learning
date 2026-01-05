@@ -129,7 +129,8 @@ def load_srl_dataset(data_path: str, tokenizer=None, use_instruction: bool = Tru
     
     # Apply processing - disable auto-caching to avoid disk explosion
     # (8GB JSONL can expand to 50GB+ with chat templates)
-    num_workers = min(4, os.cpu_count() or 1)
+    cpu_count = os.cpu_count() or 4
+    num_workers = max(1, cpu_count - 1)
     dataset = raw_dataset.map(
         process_example,
         remove_columns=raw_dataset.column_names,

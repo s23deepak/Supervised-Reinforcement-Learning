@@ -256,9 +256,9 @@ def main():
         train_dataset = train_dataset.select(range(args.max_samples))
         print(f"Limited to {args.max_samples} samples for testing")
     
-    # Step 4: Create RLVR reward function
+    # Step 4: Create RLVR reward function (pass dataset for prompt-to-answer lookup)
     print("\nSetting up RLVR reward function...")
-    reward_fn = create_rlvr_reward_function()
+    reward_fn = create_rlvr_reward_function(train_dataset)
     print("RLVR reward: 1.0 for correct answer, 0.0 for incorrect")
     
     # Step 5: Configure training

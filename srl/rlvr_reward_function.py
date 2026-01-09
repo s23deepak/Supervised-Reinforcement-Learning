@@ -39,10 +39,10 @@ class RLVRRewardFunction:
         Extract final answer from model output.
         
         Handles formats:
-        - "Final Answer: A" or "Final Answer: Alice"
-        - "The answer is A" or "The answer is Alice"
+        - "Final Answer: A" or "Final Answer: 42" or "Final Answer: Alice"
+        - "The answer is A" or "The answer is 42"
         - "Therefore, the answer is B"
-        - "[A]" or "(A)"
+        - "[A]" or "(A)" or boxed answers
         
         Returns:
             Extracted answer string or None if not found.
@@ -52,9 +52,12 @@ class RLVRRewardFunction:
         
         output = output.strip()
         
+        # Pattern for answer value: letters, numbers
+        answer_pattern = r"([A-Za-z]+|[-]?\d+(?:[./]\d+)?)"
+        
         # Find ALL occurrences and take the LAST one (actual answer, not example)
-        # Pattern 1: "Final Answer: X" (can be letter or word, but not just "X")
-        matches = re.findall(r"[Ff]inal\s*[Aa]nswer[:\s]+([A-Za-z]+)", output)
+        # Pattern 1: "Final Answer: X" (can be letter, word, or number)
+        matches = re.findall(rf"[Ff]inal\s*[Aa]nswer[:\s]+{answer_pattern}", output)
         if matches:
             # Take last match, skip if it's just "X" (from example)
             for ans in reversed(matches):
@@ -62,43 +65,50 @@ class RLVRRewardFunction:
                     return ans.strip()
         
         # Pattern 2: "The answer is X" or "answer is X"
-        matches = re.findall(r"[Aa]nswer\s+is[:\s]+([A-Za-z]+)", output)
+        matches = re.findall(rf"[Aa]nswer\s+is[:\s]+{answer_pattern}", output)
         if matches:
             for ans in reversed(matches):
-                if ans.upper() != "X":
+                if ans.upper() not in ("X", "IS", "THE"):
                     return ans.strip()
         
-        # Pattern 3: Look in the last portion of output (after "assistant" if present)
-        # This handles cases where the system prompt is echoed
+        # Pattern 3: boxed answer \boxed{X}
+        matches = re.findall(r"\\boxed\{([^}]+)\}", output)
+        if matches:
+            return matches[-1].strip()
+        
+        # Pattern 4: Look in the last portion of output (after "assistant" if present)
         if "assistant" in output.lower():
-            # Get text after last "assistant"
             parts = re.split(r'assistant', output, flags=re.IGNORECASE)
             if len(parts) > 1:
                 last_part = parts[-1]
-                # Try to find answer in last part only
-                match = re.search(r"[Ff]inal\s*[Aa]nswer[:\s]+([A-Za-z]+)", last_part)
+                match = re.search(rf"[Ff]inal\s*[Aa]nswer[:\s]+{answer_pattern}", last_part)
                 if match and match.group(1).upper() != "X":
                     return match.group(1).strip()
         
-        # Pattern 4: "[A]" or "(A)" at the end
-        match = re.search(r"[\[\(]([A-Za-z]+)[\]\)]$", output)
+        # Pattern 5: "[A]" or "(A)" at the end
+        match = re.search(r"[\[\(]([A-Za-z0-9]+)[\]\)]$", output)
         if match:
             return match.group(1).strip()
         
-        # Pattern 5: Look for answer pattern in last few lines
+        # Pattern 6: Look for answer pattern in last few lines
         lines = output.strip().split('\n')
-        for line in reversed(lines[-10:]):  # Check last 10 lines
-            match = re.search(r"[Ff]inal\s*[Aa]nswer[:\s]+([A-Za-z]+)", line)
+        for line in reversed(lines[-10:]):
+            match = re.search(rf"[Ff]inal\s*[Aa]nswer[:\s]+{answer_pattern}", line)
             if match and match.group(1).upper() != "X":
                 return match.group(1).strip()
-            match = re.search(r"[Aa]nswer[:\s]+([A-Za-z]+)", line)
-            if match and match.group(1).upper() != "X":
+            match = re.search(rf"[Aa]nswer[:\s]+{answer_pattern}", line)
+            if match and match.group(1).upper() not in ("X", "IS", "THE"):
                 return match.group(1).strip()
         
-        # Pattern 6: Single capital letter at very end
+        # Pattern 7: Single capital letter at very end
         match = re.search(r"\b([A-E])\s*$", output)
         if match:
             return match.group(1).strip()
+        
+        # Pattern 8: Number at very end 
+        match = re.search(r"[-]?\d+(?:[./]\d+)?\s*$", output)
+        if match:
+            return match.group(0).strip()
         
         return None
     
@@ -165,13 +175,28 @@ class RLVRRewardFunction:
         return rewards
 
 
-def create_rlvr_reward_function():
+def create_rlvr_reward_function(train_dataset=None):
     """
     TRL-compatible RLVR reward function.
+    
+    Args:
+        train_dataset: Dataset with 'prompt' and 'correct_answer' columns.
+                       If provided, uses prompt-to-answer lookup since TRL
+                       doesn't pass correct_answer to reward functions.
     
     Returns a callable that computes RLVR rewards.
     """
     rlvr_reward = RLVRRewardFunction(case_sensitive=False)
+    
+    # Build prompt -> answer mapping if dataset provided
+    prompt_to_answer = {}
+    if train_dataset is not None:
+        print(f"  Building prompt-to-answer mapping for {len(train_dataset)} samples...")
+        for item in train_dataset:
+            # Use first 500 chars of prompt as key to handle slight variations
+            key = item["prompt"][:500] if len(item["prompt"]) > 500 else item["prompt"]
+            prompt_to_answer[key] = item["correct_answer"]
+        print(f"  Mapping built with {len(prompt_to_answer)} unique prompts")
     
     def reward_fn(completions, prompts=None, correct_answer=None, **kwargs):
         """
@@ -179,21 +204,37 @@ def create_rlvr_reward_function():
         
         Args:
             completions: List of generated texts.
-            prompts: Input prompts (unused).
-            correct_answer: Ground truth answer(s).
+            prompts: Input prompts (used for lookup).
+            correct_answer: Ground truth answer(s) - may be None if TRL doesn't pass it.
             
         Returns:
             List of rewards (1.0 for correct, 0.0 for incorrect).
         """
-        if correct_answer is None:
-            return [0.0] * len(completions)
+        rewards = []
         
-        # Handle single answer vs list
-        if isinstance(correct_answer, str):
-            answers = [correct_answer] * len(completions)
-        else:
-            answers = correct_answer
+        for i, completion in enumerate(completions):
+            # Try to get correct answer from kwargs first (if TRL passes it)
+            if correct_answer is not None:
+                if isinstance(correct_answer, str):
+                    answer = correct_answer
+                elif isinstance(correct_answer, list) and i < len(correct_answer):
+                    answer = correct_answer[i]
+                else:
+                    answer = None
+            # Fall back to prompt lookup
+            elif prompts is not None and prompt_to_answer:
+                prompt = prompts[i] if isinstance(prompts, list) else prompts
+                key = prompt[:500] if len(prompt) > 500 else prompt
+                answer = prompt_to_answer.get(key, None)
+            else:
+                answer = None
+            
+            if answer:
+                reward = rlvr_reward(completion, answer)
+            else:
+                reward = 0.0
+            rewards.append(reward)
         
-        return rlvr_reward.compute_batch_rewards(completions, answers)
+        return rewards
     
     return reward_fn

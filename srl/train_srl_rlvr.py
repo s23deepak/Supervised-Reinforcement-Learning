@@ -126,6 +126,9 @@ def main():
     parser.add_argument("--base-model", type=str, 
                         default="unsloth/qwen2.5-3b-instruct-bnb-4bit",
                         help="Base model (if checkpoint is LoRA adapter)")
+    parser.add_argument("--batch-size", type=int, default=1, help="Per-device batch size")
+    parser.add_argument("--grad-accum", type=int, default=4, help="Gradient accumulation steps")
+    parser.add_argument("--lr", type=float, default=5e-6, help="Learning rate")
     parser.add_argument("--epochs", type=int, default=1, help="Training epochs")
     parser.add_argument("--train-data", type=str, 
                         default="./rlvr_datasets/train.jsonl",
@@ -264,9 +267,9 @@ def main():
     config_kwargs = {
         "output_dir": args.output_dir,
         "num_train_epochs": args.epochs,
-        "per_device_train_batch_size": 1,
-        "gradient_accumulation_steps": 4,
-        "learning_rate": 5e-6,
+        "per_device_train_batch_size": args.batch_size,
+        "gradient_accumulation_steps": args.grad_accum,
+        "learning_rate": args.lr,
         "warmup_ratio": 0.1,
         "lr_scheduler_type": "cosine",
         "max_completion_length": 1024, 

@@ -30,7 +30,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
 from datasets import Dataset, load_dataset, load_from_disk
-from unsloth import FastLanguageModel
+from unsloth import FastLanguageModel, PatchFastRL
 from peft import PeftModel
 
 from trl import GRPOConfig, GRPOTrainer

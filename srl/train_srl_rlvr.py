@@ -24,6 +24,7 @@ import os
 import sys
 import json
 import argparse
+import gc
 
 # Environment setup
 os.environ["TOKENIZERS_PARALLELISM"] = "false"

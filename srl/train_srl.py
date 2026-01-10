@@ -48,43 +48,16 @@ from unified_logger import UnifiedLoggerCallback, patch_trainer, set_global_logg
 from vllm_server_client import VLLMServerClient, VLLMSleepModeCallback
 from functools import partial
 
-# SRL instruction: tell model to think first, then generate step
-SRL_INSTRUCTION = """You are a helpful assistant for solving logical reasoning problems step by step.
-A user will provide a reasoning problem, which may include a partial solution with previous steps.
-Your task is to continue the solution by providing the very next logical step.
 
-First, draft your thinking process (inner monologue). Then, generate the solution.
-Your response format must follow the template below:
-
-<think>
-Your thoughts or draft, like working through an exercise on scratch paper.
-Be as casual and as long as you want until you are confident to generate the correct next step.
-</think>
-
-Provide only the single, next step to continue the solution. Do not solve the entire problem.
-
-STEP FORMAT REQUIREMENTS:
-- Start each step with "Step N:" where N is the step number
-- For constraint checking, use "Checking constraint N:"
-- For the final answer, use "Final Answer: X"
-
-EXAMPLES:
-- "Step 1: Let's identify the key constraints in this problem."
-- "Checking constraint 1: Alice cannot sit next to Bob."
-- "Final Answer: C"
-
-"""
-
-
-def load_srl_dataset(data_path: str, tokenizer=None, use_instruction: bool = True, cache_dir: str = None) -> Dataset:
+def load_srl_dataset(data_path: str, tokenizer=None, cache_dir: str = None, system_prompt: str = None) -> Dataset:
     """
     Load SRL training data from JSONL file.
     
     Args:
         data_path: Path to JSONL file.
         tokenizer: Tokenizer to apply chat template.
-        use_instruction: Whether to use SRL instruction as system prompt.
         cache_dir: If provided, save/load processed dataset to/from this directory.
+        system_prompt: Optional system prompt to prepend. If None, no system message is added.
         
     Returns:
         HuggingFace Dataset with prompts and expert actions.
@@ -106,8 +79,8 @@ def load_srl_dataset(data_path: str, tokenizer=None, use_instruction: bool = Tru
     def process_example(item):
         """Process a single example - applied lazily via map()."""
         messages = []
-        if use_instruction:
-            messages.append({"role": "system", "content": SRL_INSTRUCTION.strip()})
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt.strip()})
         messages.append({"role": "user", "content": item["input_prompt"]})
         
         # Apply chat template to get prompt
@@ -144,7 +117,7 @@ def load_srl_dataset(data_path: str, tokenizer=None, use_instruction: bool = Tru
     if cache_dir:
         print(f"  Saving preprocessed dataset to cache: {cache_dir}")
         dataset.save_to_disk(cache_dir)
-    print(f"  System prompt: {'enabled' if use_instruction else 'disabled'}")
+    print(f"  System prompt: {'provided' if system_prompt else 'none'}")
     return dataset
 
 
@@ -215,6 +188,175 @@ def create_srl_reward_function(format_check: bool = False, use_dynamic_filter: b
     
     return reward_fn
 
+def train_srl(
+    model_name: str,
+    train_data: str,
+    output_dir: str = "./checkpoints_srl",
+    system_prompt: str = None,
+    epochs: int = 1,
+    batch_size: int = 8,
+    grad_accum: int = 4,
+    lr: float = 5e-6,
+    num_rollouts: int = 4,
+    max_seq_length: int = 2048,
+    max_completion_length: int = 256,
+    max_samples: int = None,
+    lora_rank: int = 16,
+    load_in_4bit: bool = True,
+    gpu_memory: float = 0.6,
+    cache_dir: str = None,
+    use_lmcache: bool = False,
+):
+    """
+    Train SRL model programmatically (no command-line args).
+    
+    Args:
+        model_name: HuggingFace model name or local path
+        train_data: Path to training JSONL file(s)
+        output_dir: Directory to save checkpoints
+        system_prompt: Optional system prompt to prepend
+        epochs: Number of training epochs
+        batch_size: Per-device batch size
+        grad_accum: Gradient accumulation steps
+        lr: Learning rate
+        num_rollouts: Rollouts per prompt (K)
+        max_seq_length: Max input sequence length
+        max_completion_length: Max generation length
+        max_samples: Limit dataset size (for testing)
+        lora_rank: LoRA rank
+        load_in_4bit: Whether to load in 4-bit quantization
+        gpu_memory: vLLM GPU memory utilization (0.0-1.0)
+        cache_dir: Directory to cache preprocessed dataset
+        use_lmcache: Enable LMCache for cross-batch KV caching
+        
+    Returns:
+        tuple: (model, tokenizer, trainer) - trained model and trainer
+    """
+    print("=" * 70)
+    print("SRL Training: TRL GRPOTrainer + Unsloth + vLLM")
+    print("=" * 70)
+    print(f"Model: {model_name}")
+    print(f"Train Data: {train_data}")
+    print(f"Output Dir: {output_dir}")
+    
+    # Auto-detect bf16 support
+    use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    print(f"Using bf16: {use_bf16}")
+    print(f"Batch Size: {batch_size} x {grad_accum} (grad accum)")
+    print("=" * 70)
+    
+    # Step 1: Apply GRPO Patches
+    print("\n[Step 1] Applying GRPO patches...")
+    PatchFastRL("GRPO", FastLanguageModel)
+    
+    # Step 2: Load Model
+    print("\n[Step 2] Loading model...")
+    kv_transfer_config = None
+    if use_lmcache:
+        os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
+        os.environ["LMCACHE_LOCAL_CPU"] = "True"
+        kv_transfer_config = {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
+        print("LMCache enabled")
+    
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=model_name,
+        max_seq_length=max_seq_length,
+        load_in_4bit=load_in_4bit,
+        fast_inference=True,
+        gpu_memory_utilization=gpu_memory,
+        enable_prefix_caching=True,
+        kv_transfer_config=kv_transfer_config,
+    )
+    print("Model loaded with vLLM")
+    
+    # Step 3: Attach LoRA
+    print("\n[Step 3] Attaching LoRA adapters...")
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=lora_rank,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        lora_alpha=lora_rank,
+        lora_dropout=0.0,
+        bias="none",
+        use_gradient_checkpointing="unsloth",
+        random_state=3407,
+    )
+    
+    # Step 4: Load Dataset
+    print("\n[Step 4] Loading dataset...")
+    if system_prompt:
+        print(f"  Using system prompt ({len(system_prompt)} chars)")
+    train_dataset = load_srl_dataset(train_data, tokenizer=tokenizer, cache_dir=cache_dir, system_prompt=system_prompt)
+    
+    if max_samples and max_samples < len(train_dataset):
+        train_dataset = train_dataset.select(range(max_samples))
+        print(f"Limited to {max_samples} samples")
+    
+    # Step 5: Create Reward Function
+    print("\n[Step 5] Setting up SRL reward function...")
+    reward_fn = create_srl_reward_function(format_check=False)
+    
+    # Step 6: Configure Trainer
+    print("\n[Step 6] Configuring GRPOTrainer...")
+    training_args = GRPOConfig(
+        output_dir=output_dir,
+        learning_rate=lr,
+        per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=grad_accum,
+        num_train_epochs=epochs,
+        max_grad_norm=1.0,
+        num_generations=num_rollouts,
+        max_completion_length=max_completion_length,
+        temperature=1.0,
+        bf16=use_bf16,
+        fp16=not use_bf16,
+        gradient_checkpointing=True,
+        logging_steps=10,
+        logging_dir=os.path.join(output_dir, "logs"),
+        report_to="tensorboard",
+        save_strategy="epoch",
+        use_vllm=True,
+        vllm_gpu_memory_utilization=gpu_memory,
+        push_to_hub=False,
+    )
+    
+    logger_callback = UnifiedLoggerCallback(output_dir=output_dir, sample_interval=0.5)
+    set_global_logger(logger_callback.logger)
+    patch_trainer()
+    
+    collator = partial(prefix_aware_collate_fn, tokenizer=tokenizer)
+    
+    trainer = GRPOTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        reward_funcs=reward_fn,
+        tokenizer=tokenizer,
+        callbacks=[logger_callback],
+        data_collator=collator,
+    )
+    
+    # Step 7: Train
+    print("\n[Step 7] Starting training...")
+    print("=" * 70)
+    trainer.train()
+    
+    # Step 8: Save
+    print("\n[Step 8] Saving model...")
+    final_path = os.path.join(output_dir, "final")
+    model.save_pretrained(final_path)
+    tokenizer.save_pretrained(final_path)
+    print(f"Model saved to: {final_path}")
+    
+    print("\n" + "=" * 70)
+    print("SRL Training Complete!")
+    print("=" * 70)
+    
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    return model, tokenizer, trainer
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -253,8 +395,9 @@ def main():
     parser.add_argument("--cache-dir", type=str, default=None,
                         help="Directory to cache preprocessed dataset (speeds up subsequent runs)")
     
-    # Other
-    parser.add_argument("--no-instruction", action="store_true", help="Disable SRL step instruction")
+    # Prompt customization
+    parser.add_argument("--system-prompt", type=str, default=None,
+                        help="System prompt to prepend to all prompts (optional)")
     
     parser.add_argument("--vllm-server", action="store_true",
                         help="Use external vLLM server (for LMCache disk caching)")
@@ -278,238 +421,33 @@ def main():
     # Handle 4-bit flag
     load_in_4bit = not args.no_4bit
     
-    # Configuration
-    print("=" * 70)
-    print("SRL Training: TRL GRPOTrainer + Unsloth + vLLM Sleep Mode")
-    print("=" * 70)
-    
-    model_name = args.model
-    lora_rank = args.lora_rank
-    
-    print(f"Model: {model_name}")
-    print(f"LoRA Rank: {lora_rank}")
-    print(f"Load in 4-bit: {load_in_4bit}")
-    
-    # Auto-detect bf16 support (Ampere+ required)
-    use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-    print(f"Using bf16: {use_bf16}" + ("" if use_bf16 else " (GPU doesn't support bf16, using fp16)"))
-    print(f"Batch Size: {args.batch_size} x {args.grad_accum} (grad accum)")
-    print(f"Num Rollouts: {args.num_rollouts}")
-    print(f"Max Seq Length: {args.max_seq_length}")
-    print(f"Max Completion Length: {args.max_completion_length}")
-    print(f"GPU Memory: {args.gpu_memory:.0%}")
-    if args.vllm_server:
-        print(f"vLLM Server Mode: ENABLED")
-        print(f"  Server URL: {args.vllm_server_url}")
-    print("=" * 70)
-    
-    
-    # Step 1: Apply GRPO Patches
-    
-    print("\n[Step 1] Applying GRPO patches...")
-    PatchFastRL("GRPO", FastLanguageModel)
-    
-    
-    # Step 2: Load Model
-    
-    print("\n[Step 2] Loading model...")
-    
-    # Configure LMCache if enabled
-    kv_transfer_config = None
-    if args.use_lmcache:
-        os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
-        os.environ["LMCACHE_LOCAL_CPU"] = "True"
-        os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5.0"
-        os.environ["LMCACHE_ASYNC_OFFLOAD"] = "True"
-        os.environ["LMCACHE_OFFLOAD_PATH"] = "/tmp"
-        kv_transfer_config = {
-            "kv_connector": "LMCacheConnectorV1",
-            "kv_role": "kv_both",
-        }
-        print("LMCache enabled for cross-batch KV caching")
-    # Load with vLLM for fast inference
-    try:
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=model_name,
-            max_seq_length=args.max_seq_length,
-            load_in_4bit=load_in_4bit,
-            fast_inference=True,
-            gpu_memory_utilization=args.gpu_memory,
-            # Enable prefix caching for KV-cache reuse
-            # When prompts share a common prefix (same question and previous steps),
-            enable_prefix_caching=True,
-            kv_transfer_config=kv_transfer_config,  # LMCache support
-        )
-        print("Model loaded with vLLM")
-    except Exception as e:
-        print(f"vLLM failed: {e}")
-        print("Falling back to standard inference...")
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=model_name,
-            max_seq_length=args.max_seq_length,
-            load_in_4bit=load_in_4bit,
-        )
-    
-    
-    # Step 3: Attach LoRA Adapters
-    
-    print("\n[Step 3] Attaching LoRA adapters...")
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=lora_rank,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                       "gate_proj", "up_proj", "down_proj"],
-        lora_alpha=lora_rank,
-        lora_dropout=0.0,
-        bias="none",
-        use_gradient_checkpointing="unsloth",
-        random_state=3407,
-    )
-    model.print_trainable_parameters()
-    
-    
-    # Step 4: Load Dataset
-    
-    print("\n[Step 4] Loading dataset...")
-    train_dataset = load_srl_dataset(
-        args.train_data, 
-        tokenizer=tokenizer,
-        use_instruction=not args.no_instruction,
-        cache_dir=args.cache_dir
-    )
-    
-    # Limit dataset size for testing
-    if args.max_samples and args.max_samples < len(train_dataset):
-        train_dataset = train_dataset.select(range(args.max_samples))
-        print(f"Limited to {args.max_samples} samples for testing")
-    
-    # Step 5: Create Reward Function
-    
-    print("\n[Step 5] Setting up SRL reward function...")
-    reward_fn = create_srl_reward_function(format_check=False)
-    
-    
-    # Step 6: Configure GRPOTrainer with vLLM Sleep Mode
-    
-    print("\n[Step 6] Configuring GRPOTrainer...")
-    
-    config_kwargs = {
-        "output_dir": args.output_dir,
-        
-        # Training hyperparameters
-        "learning_rate": args.lr,
-        "per_device_train_batch_size": args.batch_size,
-        "gradient_accumulation_steps": args.grad_accum,
-        "num_train_epochs": args.epochs,
-        "max_grad_norm": 1.0,
-        
-        # GRPO specific
-        "num_generations": args.num_rollouts,
-        "max_completion_length": args.max_completion_length,
-        "temperature": 1.0,
-        
-        "bf16": use_bf16,
-        "fp16": not use_bf16,
-        "gradient_checkpointing": True,
-        
-        # Logging
-        "logging_steps": 10,
-        "logging_dir": os.path.join(args.output_dir, "logs"),
-        "report_to": "tensorboard",
-        "save_strategy": "epoch",
-        
-        # vLLM
-        "use_vllm": True,
-        "vllm_gpu_memory_utilization": args.gpu_memory,
-        
-        "push_to_hub": False,
-    }
-    
-    # Configure vLLM server mode if enabled
-    if args.vllm_server:
-        # Parse URL into host and port
-        from urllib.parse import urlparse
-        parsed = urlparse(args.vllm_server_url.replace('/v1', ''))
-        config_kwargs["vllm_mode"] = "server"
-        config_kwargs["vllm_server_host"] = parsed.hostname or "localhost"
-        config_kwargs["vllm_server_port"] = parsed.port or 8000
-        print(f"[vLLM Server Mode] Using external server at {parsed.hostname}:{parsed.port}")
-        print("  Make sure the vLLM server is running: ./start_vllm_server.sh")
-    # Initialize vLLM sleep mode client if enabled
-    vllm_client = None
-    if args.vllm_server and args.vllm_sleep_mode:
-        vllm_client = VLLMServerClient(args.vllm_server_url)
-        if vllm_client.wait_for_ready():
-            print("[vLLM Sleep Mode] Sleep/wake coordination enabled")
-        else:
-            print("[WARNING] vLLM server not responding, sleep mode disabled")
-            vllm_client = None
-    training_args = GRPOConfig(**config_kwargs)
-    
-    # Create unified logger with comprehensive metrics
-    logger_callback = UnifiedLoggerCallback(
+    # Call the train_srl function
+    model, tokenizer, trainer = train_srl(
+        model_name=args.model,
+        train_data=args.train_data,
         output_dir=args.output_dir,
-        sample_interval=0.5
+        system_prompt=args.system_prompt,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        grad_accum=args.grad_accum,
+        lr=args.lr,
+        num_rollouts=args.num_rollouts,
+        max_seq_length=args.max_seq_length,
+        max_completion_length=args.max_completion_length,
+        max_samples=args.max_samples,
+        lora_rank=args.lora_rank,
+        load_in_4bit=load_in_4bit,
+        gpu_memory=args.gpu_memory,
+        cache_dir=args.cache_dir,
+        use_lmcache=args.use_lmcache,
     )
-    # Set global logger for phase tracking
-    set_global_logger(logger_callback.logger)
-    
-    # Patch GRPOTrainer to emit phase signals
-    patch_trainer()
-    
-    # Create prefix-aware collator for KV-cache optimization
-    collator = partial(prefix_aware_collate_fn, tokenizer=tokenizer)
-    
-    # Build callbacks list
-    callbacks = [logger_callback]
-    # Use SleepAwareGRPOTrainer if sleep mode is enabled
-    if vllm_client:
-        print("[vLLM Sleep Mode] Using SleepAwareGRPOTrainer")
-        trainer = SleepAwareGRPOTrainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_dataset,
-            reward_funcs=reward_fn,
-            tokenizer=tokenizer,
-            callbacks=callbacks,
-            data_collator=collator,
-            vllm_server_client=vllm_client,
-        )
-    else:
-        trainer = GRPOTrainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_dataset,
-            reward_funcs=reward_fn,
-            tokenizer=tokenizer,
-            callbacks=callbacks,
-            data_collator=collator,
-        )
-    
-   
-    
-    # Step 7: Training
-    
-    print("\n[Step 7] Starting training...")
-    print("=" * 70)
-    
-    trainer.train()
-    
-    
-    # Step 8: Save Model
-    
-    print("\n[Step 8] Saving model...")
-    final_path = os.path.join(args.output_dir, "final")
-    model.save_pretrained(final_path)
-    tokenizer.save_pretrained(final_path)
-    print(f"Model saved to: {final_path}")
     
     # Push to HuggingFace Hub if requested
     if args.push_to_hub:
         if not args.hub_repo:
             print("Warning: --push-to-hub requires --hub-repo. Skipping push.")
         else:
-            print(f"\n[Step 9] Pushing to HuggingFace Hub: {args.hub_repo}")
+            print(f"\n[Pushing to HuggingFace Hub: {args.hub_repo}]")
             try:
                 token = args.hub_token or os.environ.get("HF_TOKEN")
                 model.push_to_hub(args.hub_repo, token=token)
@@ -517,17 +455,6 @@ def main():
                 print(f"Model pushed to: https://huggingface.co/{args.hub_repo}")
             except Exception as e:
                 print(f"Failed to push to hub: {e}")
-    
-    print("\n" + "=" * 70)
-    print("Training Complete!")
-    print(f"Model saved to: {final_path}")
-    if args.push_to_hub and args.hub_repo:
-        print(f"Model on Hub: https://huggingface.co/{args.hub_repo}")
-    print("=" * 70)
-    
-    # Cleanup
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

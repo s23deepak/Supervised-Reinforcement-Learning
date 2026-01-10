@@ -39,7 +39,7 @@ from rlvr_reward_function import create_rlvr_reward_function
 from unified_logger import UnifiedLoggerCallback, patch_trainer, set_global_logger
 
 
-def load_rlvr_dataset(data_path: str, tokenizer=None, cache_dir: str = None) -> Dataset:
+def load_rlvr_dataset(data_path: str, tokenizer=None, cache_dir: str = None, system_prompt: str = None) -> Dataset:
     """
     Load RLVR training data from JSONL file.
     
@@ -47,6 +47,7 @@ def load_rlvr_dataset(data_path: str, tokenizer=None, cache_dir: str = None) -> 
         data_path: Path to JSONL file with question/correct_answer fields.
         tokenizer: Tokenizer for chat template.
         cache_dir: If provided, save/load processed dataset to/from this directory.
+        system_prompt: Optional system prompt. If None, no system message is added.
         
     Returns:
         HuggingFace Dataset with prompts and correct answers.
@@ -55,19 +56,6 @@ def load_rlvr_dataset(data_path: str, tokenizer=None, cache_dir: str = None) -> 
     if cache_dir and os.path.exists(cache_dir):
         print(f"  Loading preprocessed dataset from cache: {cache_dir}")
         return load_from_disk(cache_dir)
-    # System prompt for RLVR
-    system_prompt = """You are a helpful assistant for solving logical reasoning problems.
-Solve the problem step by step, then provide your final answer.
-
-First, think through the problem in <think> tags.
-Then provide your reasoning steps.
-Finally, state your answer as "Final Answer: X" where X is the letter (A, B, C, or D).
-
-Example format:
-<think>Let me analyze the constraints...</think>
-Step 1: ...
-Step 2: ...
-Final Answer: B"""
 
     raw_dataset = load_dataset('json', data_files=data_path, split='train')
     print(f"  Loaded {len(raw_dataset)} samples")
@@ -80,10 +68,10 @@ Final Answer: B"""
         if not question or not answer:
             return {"prompt": "", "correct_answer": ""}
         
-        chat_messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question}
-        ]
+        chat_messages = []
+        if system_prompt:
+            chat_messages.append({"role": "system", "content": system_prompt.strip()})
+        chat_messages.append({"role": "user", "content": question})
         
         if tokenizer:
             prompt = tokenizer.apply_chat_template(
@@ -118,6 +106,166 @@ Final Answer: B"""
         dataset.save_to_disk(cache_dir)
     return dataset
 
+def train_rlvr(
+    base_model: str,
+    train_data: str,
+    output_dir: str = "./checkpoints_rlvr",
+    srl_checkpoint: str = None,
+    system_prompt: str = None,
+    epochs: int = 1,
+    batch_size: int = 8,
+    grad_accum: int = 4,
+    lr: float = 5e-6,
+    num_rollouts: int = 4,
+    max_seq_length: int = 2048,
+    max_completion_length: int = 512,
+    max_samples: int = None,
+    lora_rank: int = 16,
+    load_in_4bit: bool = True,
+    gpu_memory: float = 0.6,
+    cache_dir: str = None,
+):
+    """
+    Train RLVR model programmatically (no command-line args).
+    
+    Args:
+        base_model: HuggingFace model name or local path
+        train_data: Path to training JSONL file(s)
+        output_dir: Directory to save checkpoints
+        srl_checkpoint: Path to SRL checkpoint (optional, will attach fresh LoRA if None)
+        system_prompt: Optional system prompt to prepend
+        epochs: Number of training epochs
+        batch_size: Per-device batch size
+        grad_accum: Gradient accumulation steps
+        lr: Learning rate
+        num_rollouts: Rollouts per prompt (K)
+        max_seq_length: Max input sequence length
+        max_completion_length: Max generation length (keep low to avoid Unsloth bug)
+        max_samples: Limit dataset size (for testing)
+        lora_rank: LoRA rank
+        load_in_4bit: Whether to load in 4-bit quantization
+        gpu_memory: vLLM GPU memory utilization (0.0-1.0)
+        cache_dir: Directory to cache preprocessed dataset
+        
+    Returns:
+        tuple: (model, tokenizer, trainer) - trained model and trainer
+    """
+    print("=" * 70)
+    print("RLVR Training (Stage 2): Fine-tuning for Final Answer Correctness")
+    print("=" * 70)
+    print(f"Base Model: {base_model}")
+    print(f"SRL Checkpoint: {srl_checkpoint or 'None (fresh LoRA)'}")
+    print(f"Train Data: {train_data}")
+    print(f"Output Dir: {output_dir}")
+    
+    # Auto-detect bf16 support
+    use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    print(f"Using bf16: {use_bf16}")
+    print(f"Batch Size: {batch_size} x {grad_accum} (grad accum)")
+    print("=" * 70)
+    
+    # Step 1: Apply GRPO Patches
+    print("\n[Step 1] Applying GRPO patches...")
+    PatchFastRL("GRPO", FastLanguageModel)
+    
+    # Step 2: Load Model
+    print("\n[Step 2] Loading model...")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=base_model,
+        max_seq_length=max_seq_length,
+        load_in_4bit=load_in_4bit,
+        fast_inference=True,
+        gpu_memory_utilization=gpu_memory,
+    )
+    print("Model loaded with vLLM")
+    
+    # Step 3: Attach LoRA (or load from SRL checkpoint)
+    print("\n[Step 3] Attaching LoRA adapters...")
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=lora_rank,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        lora_alpha=lora_rank,
+        lora_dropout=0,
+        bias="none",
+        use_gradient_checkpointing="unsloth",
+        random_state=42,
+    )
+    print("LoRA adapters attached for RLVR training")
+    
+    # Step 4: Load Dataset
+    print("\n[Step 4] Loading RLVR dataset...")
+    if system_prompt:
+        print(f"  Using system prompt ({len(system_prompt)} chars)")
+    train_dataset = load_rlvr_dataset(train_data, tokenizer=tokenizer, cache_dir=cache_dir, system_prompt=system_prompt)
+    
+    if max_samples and max_samples < len(train_dataset):
+        train_dataset = train_dataset.select(range(max_samples))
+        print(f"Limited to {max_samples} samples")
+    
+    # Step 5: Create Reward Function
+    print("\n[Step 5] Setting up RLVR reward function...")
+    reward_fn = create_rlvr_reward_function(train_dataset)
+    print("RLVR reward: 1.0 for correct answer, 0.0 for incorrect")
+    
+    # Step 6: Configure Trainer
+    print("\n[Step 6] Configuring GRPOTrainer...")
+    training_args = GRPOConfig(
+        output_dir=output_dir,
+        num_train_epochs=epochs,
+        per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=grad_accum,
+        learning_rate=lr,
+        warmup_ratio=0.1,
+        lr_scheduler_type="cosine",
+        max_completion_length=max_completion_length,
+        num_generations=num_rollouts,
+        bf16=use_bf16,
+        fp16=not use_bf16,
+        gradient_checkpointing=True,
+        logging_steps=10,
+        logging_dir=os.path.join(output_dir, "logs"),
+        report_to="tensorboard",
+        save_strategy="epoch",
+        push_to_hub=False,
+        use_vllm=True,
+        vllm_gpu_memory_utilization=gpu_memory,
+    )
+    
+    logger_callback = UnifiedLoggerCallback(output_dir=output_dir, sample_interval=0.5)
+    set_global_logger(logger_callback.logger)
+    patch_trainer()
+    
+    trainer = GRPOTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        reward_funcs=reward_fn,
+        tokenizer=tokenizer,
+        callbacks=[logger_callback],
+    )
+    
+    # Step 7: Train
+    print("\n[Step 7] Starting RLVR training...")
+    print("=" * 70)
+    trainer.train()
+    
+    # Step 8: Save
+    print("\n[Step 8] Saving model...")
+    final_path = os.path.join(output_dir, "final")
+    model.save_pretrained(final_path)
+    tokenizer.save_pretrained(final_path)
+    print(f"Model saved to: {final_path}")
+    
+    print("\n" + "=" * 70)
+    print("RLVR Training Complete!")
+    print("=" * 70)
+    
+    gc.collect()
+    torch.cuda.empty_cache()
+    
+    return model, tokenizer, trainer
+
 
 def main():
     parser = argparse.ArgumentParser(description="RLVR Training (Stage 2)")
@@ -138,6 +286,8 @@ def main():
     parser.add_argument("--max-samples", type=int, default=None, help="Limit dataset size")
     parser.add_argument("--cache-dir", type=str, default=None,
                         help="Directory to cache preprocessed dataset")
+    parser.add_argument("--system-prompt", type=str, default=None,
+                        help="Custom system prompt (overrides default RLVR prompt)")
     parser.add_argument("--no-vllm", action="store_true", help="Disable vLLM")
     parser.add_argument("--vllm-server", action="store_true",
                         help="Use external vLLM server (for LMCache disk caching)")
@@ -154,188 +304,28 @@ def main():
     
     args = parser.parse_args()
     
-    print("=" * 70)
-    print("RLVR Training (Stage 2) - Fine-tuning for Final Answer Correctness")
-    print("=" * 70)
-    
-    use_vllm = not args.no_vllm
-    
-    # Auto-detect bf16 support (Ampere+ required)
-    use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-    print(f"Using bf16: {use_bf16}" + ("" if use_bf16 else " (GPU doesn't support bf16, using fp16)"))
-    
-    # Step 1: Load SRL-pretrained model
-    # For RLVR, we load the SRL checkpoint directly (not base + adapter)
-    # This preserves Unsloth's vLLM integration including load_lora method
-    print("\n[Step 1] Loading SRL-pretrained model...")
-    print(f"  SRL checkpoint: {args.srl_checkpoint}")
-    
-    # Check if SRL checkpoint exists and has adapter
-    has_adapter = os.path.exists(os.path.join(args.srl_checkpoint, "adapter_config.json"))
-    
-    if has_adapter:
-        # Load base model then merge/load adapter properly
-        print(f"  Loading base model: {args.base_model}")
-        
-        if use_vllm:
-            try:
-                # Load base model with vLLM
-                model, tokenizer = FastLanguageModel.from_pretrained(
-                    model_name=args.base_model,
-                    max_seq_length=2048,
-                    load_in_4bit=True,
-                    fast_inference=True,
-                    gpu_memory_utilization=0.6,
-                )
-                print("  Base model loaded with vLLM")
-                
-                # Attach fresh LoRA for RLVR training (don't load SRL adapter)
-                # The SRL knowledge is expected to be in a merged checkpoint
-                # For adapter checkpoints, we'll train from base
-                print("  Note: For vLLM, starting from base model (SRL adapter will be loaded separately)")
-                
-            except Exception as e:
-                print(f"  vLLM failed: {e}")
-                use_vllm = False
-        
-        if not use_vllm:
-            # Standard loading - can use PeftModel
-            model, tokenizer = FastLanguageModel.from_pretrained(
-                model_name=args.base_model,
-                max_seq_length=2048,
-                load_in_4bit=True,
-            )
-            model = PeftModel.from_pretrained(model, args.srl_checkpoint)
-            print(f"  Loaded SRL adapter from {args.srl_checkpoint}")
-    else:
-        # No adapter - load base model or merged model
-        model_path = args.srl_checkpoint if os.path.exists(args.srl_checkpoint) else args.base_model
-        print(f"  Loading model from: {model_path}")
-        
-        if use_vllm:
-            try:
-                model, tokenizer = FastLanguageModel.from_pretrained(
-                    model_name=model_path,
-                    max_seq_length=2048,
-                    load_in_4bit=True,
-                    fast_inference=True,
-                    gpu_memory_utilization=0.6,
-                )
-                print("  Model loaded with vLLM")
-            except Exception as e:
-                print(f"  vLLM failed: {e}")
-                use_vllm = False
-        
-        if not use_vllm:
-            model, tokenizer = FastLanguageModel.from_pretrained(
-                model_name=model_path,
-                max_seq_length=2048,
-                load_in_4bit=True,
-            )
-            print("  Model loaded (standard inference)")
-    
-    # Step 2: Attach fresh LoRA for RLVR training
-    print("\n[Step 2] Attaching LoRA adapters for RLVR...")
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=16,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj"],
-        lora_alpha=16,
-        lora_dropout=0,
-        bias="none",
-        use_gradient_checkpointing="unsloth",
-        random_state=42,
-    )
-    
-    # Step 3: Load dataset
-    print("\n[Step 3] Loading RLVR dataset...")
-    train_dataset = load_rlvr_dataset(args.train_data, tokenizer=tokenizer, cache_dir=args.cache_dir)
-    
-    if args.max_samples and args.max_samples < len(train_dataset):
-        train_dataset = train_dataset.select(range(args.max_samples))
-        print(f"Limited to {args.max_samples} samples for testing")
-    
-    # Step 4: Create RLVR reward function (pass dataset for prompt-to-answer lookup)
-    print("\nSetting up RLVR reward function...")
-    reward_fn = create_rlvr_reward_function(train_dataset)
-    print("RLVR reward: 1.0 for correct answer, 0.0 for incorrect")
-    
-    # Step 5: Configure training
-    print("\nConfiguring GRPOTrainer...")
-    
-    config_kwargs = {
-        "output_dir": args.output_dir,
-        "num_train_epochs": args.epochs,
-        "per_device_train_batch_size": args.batch_size,
-        "gradient_accumulation_steps": args.grad_accum,
-        "learning_rate": args.lr,
-        "warmup_ratio": 0.1,
-        "lr_scheduler_type": "cosine",
-        "max_completion_length": 1024, 
-        "num_generations": args.num_rollouts,
-        "bf16": use_bf16,
-        "fp16": not use_bf16,
-        "gradient_checkpointing": True,
-        "logging_steps": 10,
-        "logging_dir": os.path.join(args.output_dir, "logs"),
-        "report_to": "tensorboard",
-        "save_strategy": "epoch",
-        "push_to_hub": False,
-    }
-    
-    if use_vllm:
-        config_kwargs.update({
-            "use_vllm": True,
-            "vllm_gpu_memory_utilization": 0.7,
-        })
-        
-        # Configure vLLM server mode if enabled
-        if args.vllm_server:
-            from urllib.parse import urlparse
-            parsed = urlparse(args.vllm_server_url.replace('/v1', ''))
-            config_kwargs["vllm_mode"] = "server"
-            config_kwargs["vllm_server_host"] = parsed.hostname or "localhost"
-            config_kwargs["vllm_server_port"] = parsed.port or 8000
-            print(f"\n[vLLM Server Mode] Using external server at {parsed.hostname}:{parsed.port}")
-            print("  Make sure the vLLM server is running: ./start_vllm_server.sh")
-    
-    training_args = GRPOConfig(**config_kwargs)
-    
-    # Create unified logger with comprehensive metrics
-    logger_callback = UnifiedLoggerCallback(
+    # Call the train_rlvr function
+    model, tokenizer, trainer = train_rlvr(
+        base_model=args.base_model,
+        train_data=args.train_data,
         output_dir=args.output_dir,
-        sample_interval=0.5
+        srl_checkpoint=args.srl_checkpoint,
+        system_prompt=args.system_prompt,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        grad_accum=args.grad_accum,
+        lr=args.lr,
+        num_rollouts=args.num_rollouts,
+        max_samples=args.max_samples,
+        cache_dir=args.cache_dir,
     )
-    set_global_logger(logger_callback.logger)
-    patch_trainer()
-    
-    trainer = GRPOTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        reward_funcs=reward_fn,
-        tokenizer=tokenizer,
-        callbacks=[logger_callback],
-    )
-    
-    # Step 6: Train
-    print("\n[Step 6] Starting RLVR training...")
-    trainer.train()
-    
-    # Step 7: Save
-    print("\n[Step 7] Saving model...")
-    final_path = os.path.join(args.output_dir, "final")
-    model.save_pretrained(final_path)
-    tokenizer.save_pretrained(final_path)
-    print(f"Model saved to: {final_path}")
     
     # Push to HuggingFace Hub if requested
     if args.push_to_hub:
         if not args.hub_repo:
             print("Warning: --push-to-hub requires --hub-repo. Skipping push.")
         else:
-            print(f"\n[Step 8] Pushing to HuggingFace Hub: {args.hub_repo}")
+            print(f"\n[Pushing to HuggingFace Hub: {args.hub_repo}]")
             try:
                 token = args.hub_token or os.environ.get("HF_TOKEN")
                 model.push_to_hub(args.hub_repo, token=token)
@@ -343,13 +333,6 @@ def main():
                 print(f"Model pushed to: https://huggingface.co/{args.hub_repo}")
             except Exception as e:
                 print(f"Failed to push to hub: {e}")
-    
-    print("\n" + "=" * 70)
-    print("RLVR Training Complete!")
-    print(f"Model saved to: {final_path}")
-    if args.push_to_hub and args.hub_repo:
-        print(f"Model on Hub: https://huggingface.co/{args.hub_repo}")
-    print("=" * 70)
 
 
 if __name__ == "__main__":

@@ -145,7 +145,7 @@ def prefix_aware_collate_fn(features, tokenizer):
     
     return batch
 
-def create_srl_reward_function(format_check: bool = False, use_dynamic_filter: bool = True):
+def create_srl_reward_function(format_check: bool = False, use_dynamic_filter: bool = True, num_generations: int = 4):
     """
     TRL-compatible reward function with SRL step-wise similarity.
     
@@ -154,6 +154,11 @@ def create_srl_reward_function(format_check: bool = False, use_dynamic_filter: b
     - prompts: list of input prompts  
     - Any additional columns from dataset (e.g., expert_action)
     Uses SRLRewardFunction.compute_batch_rewards which includes dynamic sampling.
+    
+    Args:
+        format_check: Whether to enforce step format validation.
+        use_dynamic_filter: Enable per-sample std dev filtering (Section 4.2).
+        num_generations: Number of rollouts per sample (G) for grouping.
     """
     srl_reward = SRLRewardFunction(
         format_check=format_check,
@@ -164,7 +169,7 @@ def create_srl_reward_function(format_check: bool = False, use_dynamic_filter: b
     
     def reward_fn(completions, prompts=None, expert_action=None, **kwargs):
         """
-        Compute SRL similarity rewards  with dynamic sampling.
+        Compute SRL similarity rewards with per-sample dynamic sampling.
         
         Args:
             completions: List of generated texts.
@@ -172,7 +177,7 @@ def create_srl_reward_function(format_check: bool = False, use_dynamic_filter: b
             expert_action: Ground truth action to compare against.
             
         Returns:
-            List of reward floats.
+            List of reward floats. Filtered samples get group mean.
         """
         if expert_action is None:
             return [0.0] * len(completions)
@@ -183,10 +188,13 @@ def create_srl_reward_function(format_check: bool = False, use_dynamic_filter: b
         else:
             expert_actions = expert_action
         
-        # Use compute_batch_rewards which includes dynamic sampling filter
-        return srl_reward.compute_batch_rewards(completions, expert_actions)
+        # Use compute_batch_rewards with num_generations for per-sample filtering
+        return srl_reward.compute_batch_rewards(
+            completions, expert_actions, num_generations=num_generations
+        )
     
     return reward_fn
+
 
 def train_srl(
     model_name: str,
@@ -294,7 +302,7 @@ def train_srl(
     
     # Step 5: Create Reward Function
     print("\n[Step 5] Setting up SRL reward function...")
-    reward_fn = create_srl_reward_function(format_check=False)
+    reward_fn = create_srl_reward_function(format_check=False, num_generations=num_rollouts)
     
     # Step 6: Configure Trainer
     print("\n[Step 6] Configuring GRPOTrainer...")

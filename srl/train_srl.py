@@ -259,11 +259,13 @@ def train_srl(
     
     # Step 2: Load Model
     print("\n[Step 2] Loading model...")
-    kv_transfer_config = None
+    
+    # Build optional kwargs
+    model_kwargs = {}
     if use_lmcache:
         os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
         os.environ["LMCACHE_LOCAL_CPU"] = "True"
-        kv_transfer_config = {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
+        model_kwargs["kv_transfer_config"] = {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
         print("LMCache enabled")
     
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -273,7 +275,7 @@ def train_srl(
         fast_inference=True,
         gpu_memory_utilization=gpu_memory,
         enable_prefix_caching=True,
-        kv_transfer_config=kv_transfer_config,
+        **model_kwargs,
     )
     print("Model loaded with vLLM")
     

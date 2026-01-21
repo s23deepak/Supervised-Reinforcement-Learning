@@ -4,7 +4,7 @@ SRL Reward Function Implementation
 
 Classes:
     - SRLRewardFunction: Sequence similarity reward function for SRL training
-    - DynamicSamplingFilter: Filter samples based on reward variance
+    - DynamicSamplingFilter: Filter samples based on reward standard deviation
 
 Methods in SRLRewardFunction:
     - __init__(format_check: bool, min_similarity: float, penalty_for_format_error: float)
@@ -15,14 +15,15 @@ Methods in SRLRewardFunction:
     - get_similarity_details(generated_action: str, expert_action: str) -> Dict[str, Any]
 
 Methods in DynamicSamplingFilter:
-    - __init__(variance_threshold: float)
+    - __init__(std_threshold: float)
     - should_keep_sample(rewards: list) -> bool
 
 Uses cdifflib (C extension) with ThreadPoolExecutor for parallel reward computation.
 """
 
 import difflib
-from typing import Dict, Any
+import statistics
+from typing import Dict, Any, List
 import re
 from concurrent.futures import ThreadPoolExecutor
 import os
@@ -31,7 +32,7 @@ from cdifflib import CSequenceMatcher
 from unified_logger import begin_phase, end_phase, log_samples
 
 # Number of CPU cores for parallel reward computation
-NUM_WORKERS = min(os.cpu_count() or 4, 8)
+NUM_WORKERS = max(os.cpu_count() or 4, 8)
 
 print(f"[SRL Reward] Using cdifflib with {NUM_WORKERS} workers")
 
@@ -44,15 +45,15 @@ class SRLRewardFunction:
                  min_similarity: float = 0.0,
                  penalty_for_format_error: float = -1.0,
                  use_dynamic_filter: bool = True,
-                 variance_threshold: float = 0.01):
+                 std_threshold: float = 0.1):
         self.format_check = format_check
         self.min_similarity = min_similarity
         self.penalty_for_format_error = penalty_for_format_error
         self.use_dynamic_filter = use_dynamic_filter
-        self.dynamic_filter = DynamicSamplingFilter(variance_threshold) if use_dynamic_filter else None
+        self.dynamic_filter = DynamicSamplingFilter(std_threshold) if use_dynamic_filter else None
 
     def check_format(self, generated_output: str) -> bool:
-        """Check if generated output is in expected format "Step N: content", "Checking Constraint N: content" or "Final Answer: ..."""
+        """Check if generated output is in expected format "Step N: content", "Checking Constraint N: content" or "Final Answer: ..." """
         if not self.format_check:
             return True
 
@@ -92,19 +93,32 @@ class SRLRewardFunction:
     def compute_batch_rewards(self, 
                               completions: list, 
                               expert_actions: list,
+                              num_generations: int = 4,
                               parallel: bool = True,
-                              n_workers: int = None) -> list:
+                              n_workers: int = None) -> List[float]:
         """
-        Compute rewards for a batch of completions with dynamic sampling.
+        Compute rewards for a batch of completions with per-sample dynamic sampling.
+        
+        Implements Section 4.2 of SRL paper (arXiv 2510.25992):
+        - Groups completions by num_generations (G rollouts per sample)
+        - Filters each sample based on reward std dev across its rollouts  
+        - For filtered samples: replaces rewards with group mean (advantage → 0)
+        
+        Why group-mean replacement works:
+        - TRL computes advantage = reward - mean(group_rewards)
+        - If all rewards in group = mean, then advantage = 0 for all
+        - Zero advantage = no policy gradient update = sample effectively skipped
+        - This avoids NaN (corrupts weights) and avoids 0.0 penalty (still trains via KL)
         
         Args:
-            completions: List of generated texts (K rollouts).
-            expert_actions: List of expert actions.
+            completions: List of generated texts (batch_size * num_generations).
+            expert_actions: List of expert actions (same length as completions).
+            num_generations: Number of rollouts per sample (G). Used for grouping.
             parallel: If True, compute rewards in parallel across CPU cores.
             n_workers: Number of worker threads (default: NUM_WORKERS).
             
         Returns:
-            List of rewards. All zeros if dynamic filter rejects the sample.
+            List of rewards. Filtered samples get group mean (effective no-op).
         """
         begin_phase("reward")  # Track reward computation phase
         
@@ -117,6 +131,7 @@ class SRLRewardFunction:
         if n_workers is None:
             n_workers = min(n, NUM_WORKERS)
         
+        # Step 1: Compute all rewards in parallel
         if parallel and n > 1:
             with ThreadPoolExecutor(max_workers=n_workers) as executor:
                 rewards = list(executor.map(
@@ -125,19 +140,32 @@ class SRLRewardFunction:
                     expert_actions
                 ))
         else:
-            # Sequential computation
-            rewards = []
-            for completion, expert in zip(completions, expert_actions):
-                reward = self(completion, expert)
-                rewards.append(reward)
+            rewards = [self(c, e) for c, e in zip(completions, expert_actions)]
         
-        # Apply dynamic sampling filter (Section 4.2 of SRL paper)
-        if self.dynamic_filter and not self.dynamic_filter.should_keep_sample(rewards):
-            log_samples(kept=0, total=len(rewards))  # Log that all samples were filtered
-            end_phase()
-            return [0.0] * len(rewards)
+        # Step 2: Apply per-sample dynamic sampling filter (Section 4.2)
+        if self.dynamic_filter and num_generations > 1:
+            num_samples = n // num_generations
+            kept_count = 0
+            
+            for sample_idx in range(num_samples):
+                start = sample_idx * num_generations
+                end = start + num_generations
+                sample_rewards = rewards[start:end]
+                
+                # Check if this sample should be kept
+                if not self.dynamic_filter.should_keep_sample(sample_rewards):
+                    # Replace with group mean - this makes advantage ≈ 0
+                    # This is the TRL-safe way to "skip" without NaN or penalty
+                    group_mean = statistics.mean(sample_rewards)
+                    for i in range(start, end):
+                        rewards[i] = group_mean
+                else:
+                    kept_count += 1
+            
+            log_samples(kept=kept_count, total=num_samples)
+        else:
+            log_samples(kept=n, total=n)
         
-        log_samples(kept=len(rewards), total=len(rewards))  # Log kept samples
         end_phase()
         return rewards
 
@@ -188,23 +216,40 @@ class SRLRewardFunction:
 
 class DynamicSamplingFilter:
     """
-    Filter samples based on reward variance.
+    Filter samples based on reward standard deviation.
     
-    DynamicSamplingFilter implements the "dynamic sampling" described in Section 4.2 of the SRL paper.
-    It filters out samples/steps where all rollouts get similar rewards (low variance), keeping only “informative” steps, improving SRL’s stability and efficiency.
+    Implements "dynamic sampling" from Section 4.2 of SRL paper (arXiv 2510.25992):
+    Retain sample if: std(rewards) > ε
+    
+    This filters out samples where all rollouts get similar rewards (low std dev),
+    keeping only "informative" samples that provide meaningful learning signal.
+    
+    Paper reports ~2-3% improvement on AIME/AMC benchmarks with this filter.
     """
 
-    def __init__(self, variance_threshold: float = 0.01):
-        self.variance_threshold = variance_threshold
+    def __init__(self, std_threshold: float = 0.1):
+        """
+        Args:
+            std_threshold: Minimum std dev to keep a sample. Paper recommends 0.05-0.1.
+        """
+        self.std_threshold = std_threshold
 
     def should_keep_sample(self, rewards: list) -> bool:
-        """Keep sample if variance > threshold"""
+        """
+        Keep sample if std dev of rewards > threshold.
+        
+        Args:
+            rewards: List of rewards for G rollouts of this sample.
+            
+        Returns:
+            True if sample should be kept for training.
+        """
         if len(rewards) < 2:
             return True
 
         import statistics
         try:
-            variance = statistics.variance(rewards)
-            return variance > self.variance_threshold
-        except:
+            std_dev = statistics.stdev(rewards)
+            return std_dev > self.std_threshold
+        except statistics.StatisticsError:
             return True

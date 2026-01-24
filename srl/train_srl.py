@@ -42,6 +42,7 @@ from datasets import Dataset, load_dataset, load_from_disk
 
 from trl import GRPOConfig, GRPOTrainer
 from sleep_aware_grpo_trainer import SleepAwareGRPOTrainer
+from resampling_grpo_trainer import ResamplingGRPOTrainer
 
 from srl_reward_function import SRLRewardFunction
 from unified_logger import UnifiedLoggerCallback, patch_trainer, set_global_logger, log_samples
@@ -214,6 +215,8 @@ def train_srl(
     gpu_memory: float = 0.6,
     cache_dir: str = None,
     use_lmcache: bool = False,
+    use_resampling: bool = True,
+    std_threshold: float = 0.1,
 ):
     """
     Train SRL model programmatically (no command-line args).
@@ -236,6 +239,8 @@ def train_srl(
         gpu_memory: vLLM GPU memory utilization (0.0-1.0)
         cache_dir: Directory to cache preprocessed dataset
         use_lmcache: Enable LMCache for cross-batch KV caching
+        use_resampling: Enable continuous re-sampling per SRL paper Section 4.2
+        std_threshold: Minimum reward std to keep a sample (for resampling)
         
     Returns:
         tuple: (model, tokenizer, trainer) - trained model and trainer
@@ -336,15 +341,31 @@ def train_srl(
     
     collator = partial(prefix_aware_collate_fn, tokenizer=tokenizer)
     
-    trainer = GRPOTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        reward_funcs=reward_fn,
-        tokenizer=tokenizer,
-        callbacks=[logger_callback],
-        data_collator=collator,
-    )
+    # Choose trainer class based on use_resampling flag
+    if use_resampling:
+        print("  Using ResamplingGRPOTrainer (continuous re-sampling enabled)")
+        trainer = ResamplingGRPOTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            reward_funcs=reward_fn,
+            tokenizer=tokenizer,
+            callbacks=[logger_callback],
+            data_collator=collator,
+            std_threshold=std_threshold,
+            max_resample_attempts=3,
+        )
+    else:
+        print("  Using standard GRPOTrainer")
+        trainer = GRPOTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            reward_funcs=reward_fn,
+            tokenizer=tokenizer,
+            callbacks=[logger_callback],
+            data_collator=collator,
+        )
     
     # Step 7: Train
     print("\n[Step 7] Starting training...")
@@ -418,6 +439,14 @@ def main():
     parser.add_argument("--use-lmcache", action="store_true",
                         help="Enable LMCache for cross-batch KV caching in embedded mode")
     
+    # Dynamic sampling / resampling
+    parser.add_argument("--use-resampling", action="store_true", default=True,
+                        help="Enable continuous re-sampling (SRL paper Section 4.2)")
+    parser.add_argument("--no-resampling", action="store_true",
+                        help="Disable continuous re-sampling")
+    parser.add_argument("--std-threshold", type=float, default=0.1,
+                        help="Minimum reward std to keep a sample (default: 0.1)")
+    
     # HuggingFace Hub
     parser.add_argument("--push-to-hub", action="store_true",
                         help="Push model to HuggingFace Hub after training")
@@ -450,6 +479,8 @@ def main():
         gpu_memory=args.gpu_memory,
         cache_dir=args.cache_dir,
         use_lmcache=args.use_lmcache,
+        use_resampling=not args.no_resampling,
+        std_threshold=args.std_threshold,
     )
     
     # Push to HuggingFace Hub if requested
